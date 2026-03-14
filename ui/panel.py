@@ -6,24 +6,28 @@ from ui.canvas import PDFCanvas
 
 
 class Panel(tk.Frame):
-    """Painel independente com seu próprio documento, navegação e zoom."""
+    """Painel independente com seu próprio documento, navegação, zoom e scroll contínuo."""
 
     def __init__(self, parent, panel_id: str, on_status_change=None):
         super().__init__(parent, bg="#1e1e1e")
 
         self.panel_id = panel_id
-        self.on_status_change = on_status_change  # callback para atualizar statusbar
+        self.on_status_change = on_status_change
         self.doc = PDFDocument()
         self.sync_scroll = False
-        self.sync_callback = None  # chamado quando o painel faz scroll sincronizado
+        self.sync_callback = None
 
         self._build()
 
-    # ------------------------------------------------------------------ UI
-
     def _build(self):
         self._build_panel_toolbar()
-        self.canvas = PDFCanvas(self, on_scroll=self._handle_scroll)
+        self.canvas = PDFCanvas(
+            self,
+            on_scroll=self._handle_scroll,
+            on_zoom=self._handle_zoom,
+            on_page_end=self._scroll_next_page,
+            on_page_start=self._scroll_prev_page,
+        )
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def _build_panel_toolbar(self):
@@ -36,12 +40,9 @@ class Panel(tk.Frame):
                "font": ("Arial", 9)}
 
         tk.Button(bar, text="Abrir", command=self.open_file, **btn).pack(side=tk.LEFT, padx=(6, 2))
-
         tk.Frame(bar, bg="#555", width=1).pack(side=tk.LEFT, fill=tk.Y, padx=6)
-
         tk.Button(bar, text="◀", command=self.prev_page, **btn).pack(side=tk.LEFT, padx=2)
         tk.Button(bar, text="▶", command=self.next_page, **btn).pack(side=tk.LEFT, padx=2)
-
         tk.Frame(bar, bg="#555", width=1).pack(side=tk.LEFT, fill=tk.Y, padx=6)
 
         self.page_entry = tk.Entry(bar, width=4, bg="#3a3a3a", fg="white",
@@ -54,16 +55,14 @@ class Panel(tk.Frame):
         self.total_label.pack(side=tk.LEFT)
 
         tk.Frame(bar, bg="#555", width=1).pack(side=tk.LEFT, fill=tk.Y, padx=6)
-
         tk.Button(bar, text="−", command=self.zoom_out,   **btn).pack(side=tk.LEFT, padx=2)
         tk.Button(bar, text="+", command=self.zoom_in,    **btn).pack(side=tk.LEFT, padx=2)
         tk.Button(bar, text="↺", command=self.zoom_reset, **btn).pack(side=tk.LEFT, padx=2)
 
-        # label do painel (ex: "Painel A")
         tk.Label(bar, text=f"Painel {self.panel_id}", bg="#252525",
                  fg="#555", font=("Arial", 8)).pack(side=tk.RIGHT, padx=8)
 
-    # ------------------------------------------------------------------ Ações
+    # ------------------------------------------------------------------ Arquivo
 
     def open_file(self):
         path = filedialog.askopenfilename(
@@ -79,28 +78,35 @@ class Panel(tk.Frame):
             messagebox.showerror("Erro", f"Não foi possível abrir o arquivo.\n{e}")
 
     def open_path(self, path: str):
-        """Abre um PDF diretamente por caminho (usado pelo app principal)."""
         try:
             self.doc.open(path)
             self._render()
         except Exception as e:
             messagebox.showerror("Erro", f"Painel {self.panel_id}: {e}")
 
-    def _render(self):
+    # ------------------------------------------------------------------ Render
+
+    def _render(self, scroll_to_bottom: bool = False):
         if not self.doc.is_open:
             return
         image = self.doc.render_current_page()
         self.canvas.display(image)
 
+        if scroll_to_bottom:
+            self.canvas.scroll_to_bottom()
+        else:
+            self.canvas.scroll_to_top()
+
         current = self.doc.page_index + 1
         total = self.doc.total_pages
-
         self.page_entry.delete(0, tk.END)
         self.page_entry.insert(0, str(current))
         self.total_label.config(text=f"/ {total}")
 
         if self.on_status_change:
             self.on_status_change(self.panel_id, current, total, self.doc.zoom)
+
+    # ------------------------------------------------------------------ Navegação
 
     def next_page(self):
         if self.doc.next_page():
@@ -122,6 +128,36 @@ class Panel(tk.Frame):
         except ValueError:
             messagebox.showwarning("Aviso", "Digite um número válido.")
 
+    # ------------------------------------------------------------------ Scroll contínuo
+
+    def _scroll_next_page(self):
+        """Avança página automaticamente ao chegar no fim."""
+        if self.doc.next_page():
+            self._render(scroll_to_bottom=False)
+
+    def _scroll_prev_page(self):
+        """Volta página automaticamente ao chegar no topo."""
+        if self.doc.prev_page():
+            self._render(scroll_to_bottom=True)
+
+    # ------------------------------------------------------------------ Zoom
+
+    def _handle_zoom(self, delta: int):
+        """Recebe delta do Ctrl+Scroll: +1 zoom in, -1 zoom out."""
+        if delta > 0:
+            self.doc.zoom_in()
+        else:
+            self.doc.zoom_out()
+        image = self.doc.render_current_page()
+        self.canvas.display(image, keep_position=True)
+        if self.on_status_change:
+            self.on_status_change(
+                self.panel_id,
+                self.doc.page_index + 1,
+                self.doc.total_pages,
+                self.doc.zoom
+            )
+
     def zoom_in(self):
         self.doc.zoom_in()
         self._render()
@@ -134,7 +170,7 @@ class Panel(tk.Frame):
         self.doc.zoom_reset()
         self._render()
 
-    # ------------------------------------------------------------------ Scroll
+    # ------------------------------------------------------------------ Scroll sincronizado
 
     def _handle_scroll(self, event):
         delta = int(-1 * (event.delta / 120))
@@ -143,5 +179,4 @@ class Panel(tk.Frame):
             self.sync_callback(delta)
 
     def scroll_to(self, delta: int):
-        """Recebe scroll externo (sincronizado)."""
         self.canvas.scroll(delta)

@@ -49,7 +49,12 @@ class App:
         self.content_frame.pack(fill=tk.BOTH, expand=True)
 
         # Modo único
-        self.single_canvas = PDFCanvas(self.content_frame)
+        self.single_canvas = PDFCanvas(
+            self.content_frame,
+            on_zoom=self._handle_zoom,
+            on_page_end=self._scroll_next_page,
+            on_page_start=self._scroll_prev_page,
+        )
         self.single_canvas.pack(fill=tk.BOTH, expand=True)
 
         # Split View (começa oculto)
@@ -79,13 +84,35 @@ class App:
         except Exception as e:
             messagebox.showerror("Erro", f"Não foi possível abrir o arquivo.\n{e}")
 
-    def _render(self):
+    def _render(self, scroll_to_bottom: bool = False):
         if not self.doc.is_open or self._split_active:
             return
         image = self.doc.render_current_page()
         self.single_canvas.display(image)
+        if scroll_to_bottom:
+            self.single_canvas.scroll_to_bottom()
+        else:
+            self.single_canvas.scroll_to_top()
         self.toolbar.update_page(self.doc.page_index + 1, self.doc.total_pages)
         self.statusbar.update(self.doc.page_index + 1, self.doc.total_pages, self.doc.zoom)
+
+    def _scroll_next_page(self):
+        if self.doc.next_page():
+            self._render(scroll_to_bottom=False)
+
+    def _scroll_prev_page(self):
+        if self.doc.prev_page():
+            self._render(scroll_to_bottom=True)
+
+    def _handle_zoom(self, delta: int):
+        if delta > 0:
+            self.doc.zoom_in()
+        else:
+            self.doc.zoom_out()
+        if self.doc.is_open:
+            image = self.doc.render_current_page()
+            self.single_canvas.display(image, keep_position=True)
+            self.statusbar.update(self.doc.page_index + 1, self.doc.total_pages, self.doc.zoom)
 
     def next_page(self):
         if self.doc.next_page():
