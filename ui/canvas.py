@@ -13,6 +13,7 @@ class PDFCanvas(tk.Frame):
         self._on_page_end = on_page_end
         self._on_page_start = on_page_start
         self._tk_img = None
+        self._last_image = None
         self._build()
 
     def _build(self):
@@ -24,6 +25,32 @@ class PDFCanvas(tk.Frame):
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
         self.canvas.bind("<MouseWheel>", self._handle_scroll)
+        self.canvas.bind("<Configure>", self._on_resize)
+
+    # ------------------------------------------------------------------ Resize
+
+    def _on_resize(self, event):
+        """Recentraliza a imagem quando o canvas é redimensionado."""
+        if self._last_image:
+            self._place_image(self._last_image)
+
+    def _place_image(self, image: Image.Image):
+        """Posiciona a imagem centralizada horizontalmente no canvas."""
+        canvas_w = self.canvas.winfo_width()
+        if canvas_w <= 1:
+            # Canvas ainda não foi desenhado — tenta novamente em 10ms
+            self.canvas.after(10, lambda: self._place_image(image))
+            return
+        x = max(canvas_w // 2, image.width // 2)
+        self.canvas.delete("all")
+        self.canvas.create_image(x, 10, anchor=tk.N, image=self._tk_img)
+        self.canvas.config(scrollregion=(
+            0, 0,
+            max(canvas_w, image.width),
+            image.height + 20
+        ))
+
+    # ------------------------------------------------------------------ Scroll
 
     def _handle_scroll(self, event):
         if event.state & 0x0004:
@@ -51,14 +78,13 @@ class PDFCanvas(tk.Frame):
         else:
             self.canvas.yview_scroll(delta, "units")
 
+    # ------------------------------------------------------------------ Display
+
     def display(self, image: Image.Image, keep_position: bool = False):
         pos = self.canvas.yview() if keep_position else None
         self._tk_img = ImageTk.PhotoImage(image)
-        self.canvas.delete("all")
-        canvas_w = self.canvas.winfo_width() or 900
-        x = max(canvas_w // 2, image.width // 2)
-        self.canvas.create_image(x, 10, anchor=tk.N, image=self._tk_img)
-        self.canvas.config(scrollregion=(0, 0, image.width, image.height + 20))
+        self._last_image = image
+        self._place_image(image)
         if keep_position and pos:
             self.canvas.yview_moveto(pos[0])
 
