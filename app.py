@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from core.history import add_recent
+from core.library import add_to_library
 from ui.toolbar import Toolbar
 from ui.tabbar import TabBar
 from ui.statusbar import Statusbar
@@ -37,6 +38,7 @@ class App:
             "zoom_reset":   self.zoom_reset,
             "toggle_split": self.toggle_split,
             "toggle_sync":  self.toggle_sync,
+            "add_to_library": self.add_active_to_library,
         }
 
         self.toolbar = Toolbar(self.root, callbacks)
@@ -87,6 +89,7 @@ class App:
 
         self.tabbar.add_tab(tab_id, short)
         add_recent(path)
+        add_to_library(path)
         self.home.refresh()
         self._select_tab(tab_id)
 
@@ -198,3 +201,11 @@ class App:
         self.toolbar.set_sync_active(active)
         msg = "Scroll sincronizado ativado" if active else "Scroll sincronizado desativado"
         self.statusbar.set_message(msg)
+
+    def add_active_to_library(self):
+        tab = self._active_tab()
+        if not tab:
+            return
+        add_to_library(tab.path)
+        self.home.refresh()
+        self.statusbar.set_message(f"'{tab.filename}' adicionado à biblioteca")

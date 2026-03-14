@@ -67,10 +67,17 @@ class Toolbar(tk.Frame):
                                   state=tk.DISABLED, **btn)
         self.btn_sync.pack(side=tk.LEFT, padx=2)
 
+        tk.Frame(self, bg="#555", width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        self.btn_add_lib = tk.Button(self, text="+ Biblioteca",
+                                     command=self._callbacks.get("add_to_library", lambda: None),
+                                     **btn)
+        self.btn_add_lib.pack(side=tk.LEFT, padx=2)
+
         self._pdf_widgets = [
             self.btn_prev, self.btn_next, self.page_entry,
             self.btn_zoom_in, self.btn_zoom_out, self.btn_zoom_reset,
-            self.btn_split, self.btn_sync,
+            self.btn_split, self.btn_sync, self.btn_add_lib,
         ]
 
     # ------------------------------------------------------------------ Estado
