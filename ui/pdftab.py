@@ -4,26 +4,24 @@ from tkinter import messagebox
 from core.document import PDFDocument
 from ui.canvas import PDFCanvas
 from ui.continuous_canvas import ContinuousCanvas
-from ui.splitview import SplitView
 
 MODE_SINGLE     = "single"
 MODE_CONTINUOUS = "continuous"
 
 
 class PDFTab(tk.Frame):
-    """Conteúdo de uma aba de PDF — suporta modo página única e contínuo."""
+    """Conteúdo de uma aba de PDF — modo página única e contínuo."""
 
     def __init__(self, parent, path: str, on_status_change=None):
         super().__init__(parent, bg="#1e1e1e")
 
-        self.path = path
-        self.filename = path.replace("\\", "/").split("/")[-1]
+        self.path       = path
+        self.filename   = path.replace("\\", "/").split("/")[-1]
         self.on_status_change = on_status_change
 
-        self.doc = PDFDocument()
+        self.doc        = PDFDocument()
         self._view_mode = MODE_SINGLE
-        self._split_active = False
-        self._sync_active = False
+        self._continuous_canvas = None
 
         self._build()
         self._open(path)
@@ -31,21 +29,12 @@ class PDFTab(tk.Frame):
     # ------------------------------------------------------------------ UI
 
     def _build(self):
-        # Modo página única
         self.single_canvas = PDFCanvas(
             self,
             on_zoom=self._handle_zoom,
             on_page_end=self._scroll_next_page,
             on_page_start=self._scroll_prev_page,
         )
-
-        # Modo contínuo (criado após abrir o doc)
-        self._continuous_canvas = None
-
-        # Split view
-        self.split_view = SplitView(self, on_status_change=self._on_panel_status)
-
-        # Começa no modo único
         self.single_canvas.pack(fill=tk.BOTH, expand=True)
 
     def _open(self, path: str):
@@ -58,15 +47,9 @@ class PDFTab(tk.Frame):
     # ------------------------------------------------------------------ Modo de visualização
 
     def set_view_mode(self, mode: str):
-        """Alterna entre MODE_SINGLE e MODE_CONTINUOUS."""
         if mode == self._view_mode:
             return
-        if self._split_active:
-            return  # split view tem seus próprios modos
-
         self._view_mode = mode
-
-        # Oculta tudo
         self.single_canvas.pack_forget()
         if self._continuous_canvas:
             self._continuous_canvas.pack_forget()
@@ -77,30 +60,27 @@ class PDFTab(tk.Frame):
         else:
             self._show_continuous()
 
-    def _show_continuous(self):
-        if self._continuous_canvas:
-            self._continuous_canvas.destroy()
-
-        self._continuous_canvas = ContinuousCanvas(
-            self,
-            doc=self.doc,
-            on_zoom=self._handle_zoom_continuous,
-            on_page_change=self._on_continuous_page_change,
-        )
-        self._continuous_canvas.pack(fill=tk.BOTH, expand=True)
-        self._continuous_canvas.load()
-
     @property
     def view_mode(self) -> str:
         return self._view_mode
 
-    # ------------------------------------------------------------------ Render (modo único)
+    def _show_continuous(self):
+        if self._continuous_canvas:
+            self._continuous_canvas.destroy()
+        self._continuous_canvas = ContinuousCanvas(
+            self,
+            doc=self.doc,
+            on_zoom=self._handle_zoom_continuous,
+            on_page_change=lambda i: self._notify_status(),
+        )
+        self._continuous_canvas.pack(fill=tk.BOTH, expand=True)
+        self._continuous_canvas.load()
+
+    # ------------------------------------------------------------------ Render
 
     def _render(self, scroll_to_bottom: bool = False):
-        if not self.doc.is_open or self._split_active:
+        if not self.doc.is_open or self._view_mode == MODE_CONTINUOUS:
             return
-        if self._view_mode == MODE_CONTINUOUS:
-            return  # contínuo se auto-gerencia
         image = self.doc.render_current_page()
         self.single_canvas.display(image)
         if scroll_to_bottom:
@@ -114,41 +94,35 @@ class PDFTab(tk.Frame):
             self.on_status_change(
                 self.doc.page_index + 1,
                 self.doc.total_pages,
-                self.doc.zoom
+                self.doc.zoom,
             )
 
     # ------------------------------------------------------------------ Navegação
 
     def next_page(self):
-        if self._view_mode == MODE_CONTINUOUS:
-            if self._continuous_canvas:
-                idx = min(self.doc.page_index + 1, self.doc.total_pages - 1)
-                self._continuous_canvas.go_to_page(idx)
-        else:
-            if self.doc.next_page():
-                self._render()
+        if self._view_mode == MODE_CONTINUOUS and self._continuous_canvas:
+            idx = min(self.doc.page_index + 1, self.doc.total_pages - 1)
+            self._continuous_canvas.go_to_page(idx)
+        elif self.doc.next_page():
+            self._render()
 
     def prev_page(self):
-        if self._view_mode == MODE_CONTINUOUS:
-            if self._continuous_canvas:
-                idx = max(self.doc.page_index - 1, 0)
-                self._continuous_canvas.go_to_page(idx)
-        else:
-            if self.doc.prev_page():
-                self._render()
+        if self._view_mode == MODE_CONTINUOUS and self._continuous_canvas:
+            idx = max(self.doc.page_index - 1, 0)
+            self._continuous_canvas.go_to_page(idx)
+        elif self.doc.prev_page():
+            self._render()
 
-    def go_to(self, page: int):
-        index = page - 1
-        if self._view_mode == MODE_CONTINUOUS:
-            if self._continuous_canvas and 0 <= index < self.doc.total_pages:
-                self._continuous_canvas.go_to_page(index)
+    def go_to(self, page: int) -> bool:
+        if self._view_mode == MODE_CONTINUOUS and self._continuous_canvas:
+            if 0 <= page - 1 < self.doc.total_pages:
+                self._continuous_canvas.go_to_page(page - 1)
                 return True
             return False
-        else:
-            if self.doc.go_to(page):
-                self._render()
-                return True
-            return False
+        if self.doc.go_to(page):
+            self._render()
+            return True
+        return False
 
     @property
     def current_page(self) -> int:
@@ -158,11 +132,9 @@ class PDFTab(tk.Frame):
     def total_pages(self) -> int:
         return self.doc.total_pages
 
-    # ------------------------------------------------------------------ Scroll contínuo (modo único)
-
     def _scroll_next_page(self):
         if self.doc.next_page():
-            self._render(scroll_to_bottom=False)
+            self._render()
             self._notify_status()
 
     def _scroll_prev_page(self):
@@ -211,49 +183,3 @@ class PDFTab(tk.Frame):
             self._continuous_canvas.reload_zoom()
         else:
             self._render()
-
-    # ------------------------------------------------------------------ Callback contínuo
-
-    def _on_continuous_page_change(self, index: int):
-        self._notify_status()
-
-    # ------------------------------------------------------------------ Split View
-
-    def toggle_split(self) -> bool:
-        self._split_active = not self._split_active
-        if self._split_active:
-            self.single_canvas.pack_forget()
-            if self._continuous_canvas:
-                self._continuous_canvas.pack_forget()
-            self.split_view.pack(fill=tk.BOTH, expand=True)
-            self.split_view.open_in_both(self.path)
-        else:
-            self.split_view.pack_forget()
-            self._sync_active = False
-            self.split_view.set_sync_scroll(False)
-            # Restaura o modo de visualização atual
-            if self._view_mode == MODE_CONTINUOUS:
-                self._show_continuous()
-            else:
-                self.single_canvas.pack(fill=tk.BOTH, expand=True)
-                self._render()
-        return self._split_active
-
-    def toggle_sync(self) -> bool:
-        if not self._split_active:
-            return False
-        self._sync_active = not self._sync_active
-        self.split_view.set_sync_scroll(self._sync_active)
-        return self._sync_active
-
-    @property
-    def split_active(self) -> bool:
-        return self._split_active
-
-    @property
-    def sync_active(self) -> bool:
-        return self._sync_active
-
-    def _on_panel_status(self, panel_id, current, total, zoom):
-        if self.on_status_change:
-            self.on_status_change(current, total, zoom)
