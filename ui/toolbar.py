@@ -58,6 +58,13 @@ class Toolbar(tk.Frame):
 
         sep()
 
+        self.btn_view_mode = tk.Button(self, text="☰ Contínuo",
+                                       command=self._callbacks.get("toggle_view_mode", lambda: None),
+                                       **btn)
+        self.btn_view_mode.pack(side=tk.LEFT, padx=2)
+
+        tk.Frame(self, bg="#555", width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
         self.btn_split = tk.Button(self, text="⊞ Split View",
                                    command=self._callbacks["toggle_split"], **btn)
         self.btn_split.pack(side=tk.LEFT, padx=2)
@@ -77,7 +84,7 @@ class Toolbar(tk.Frame):
         self._pdf_widgets = [
             self.btn_prev, self.btn_next, self.page_entry,
             self.btn_zoom_in, self.btn_zoom_out, self.btn_zoom_reset,
-            self.btn_split, self.btn_sync, self.btn_add_lib,
+            self.btn_view_mode, self.btn_split, self.btn_sync, self.btn_add_lib,
         ]
 
     # ------------------------------------------------------------------ Estado
@@ -117,6 +124,15 @@ class Toolbar(tk.Frame):
         self.page_entry.delete(0, tk.END)
         self.page_entry.insert(0, str(current))
         self.total_label.config(text=f"/ {total}")
+
+    def set_view_mode(self, mode: str):
+        """Atualiza visual do botão de modo de visualização."""
+        if mode == "continuous":
+            self.btn_view_mode.config(bg="#1a4f6b", activebackground="#1f6080",
+                                      text="☰ Contínuo ✓")
+        else:
+            self.btn_view_mode.config(bg="#3a3a3a", activebackground="#505050",
+                                      text="☰ Contínuo")
 
     def get_page_input(self) -> str:
         return self.page_entry.get()

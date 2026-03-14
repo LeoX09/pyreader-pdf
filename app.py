@@ -39,6 +39,7 @@ class App:
             "toggle_split": self.toggle_split,
             "toggle_sync":  self.toggle_sync,
             "add_to_library": self.add_active_to_library,
+            "toggle_view_mode": self.toggle_view_mode,
         }
 
         self.toolbar = Toolbar(self.root, callbacks)
@@ -209,3 +210,14 @@ class App:
         add_to_library(tab.path)
         self.home.refresh()
         self.statusbar.set_message(f"'{tab.filename}' adicionado à biblioteca")
+
+    def toggle_view_mode(self):
+        from ui.pdftab import MODE_SINGLE, MODE_CONTINUOUS
+        tab = self._active_tab()
+        if not tab:
+            return
+        new_mode = MODE_CONTINUOUS if tab.view_mode == MODE_SINGLE else MODE_SINGLE
+        tab.set_view_mode(new_mode)
+        self.toolbar.set_view_mode(new_mode)
+        label = "Modo contínuo ativado" if new_mode == MODE_CONTINUOUS else "Modo página única ativado"
+        self.statusbar.set_message(label)
