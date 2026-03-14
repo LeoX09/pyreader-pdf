@@ -5,18 +5,21 @@ from core.document import PDFDocument
 from ui.toolbar import Toolbar
 from ui.canvas import PDFCanvas
 from ui.statusbar import Statusbar
+from ui.splitview import SplitView
 
 
 class App:
-    """Classe principal — conecta a interface com a lógica do documento."""
+    """Classe principal — gerencia modo único e modo Split View."""
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("PyReader")
-        self.root.geometry("900x700")
+        self.root.title("PyReaderPDF")
+        self.root.geometry("1100x750")
         self.root.configure(bg="#1e1e1e")
 
         self.doc = PDFDocument()
+        self._split_active = False
+        self._sync_active = False
 
         self._build_ui()
 
@@ -24,13 +27,15 @@ class App:
 
     def _build_ui(self):
         callbacks = {
-            "open":       self.open_file,
-            "prev":       self.prev_page,
-            "next":       self.next_page,
-            "go_to":      self.go_to_page,
-            "zoom_in":    self.zoom_in,
-            "zoom_out":   self.zoom_out,
-            "zoom_reset": self.zoom_reset,
+            "open":          self.open_file,
+            "prev":          self.prev_page,
+            "next":          self.next_page,
+            "go_to":         self.go_to_page,
+            "zoom_in":       self.zoom_in,
+            "zoom_out":      self.zoom_out,
+            "zoom_reset":    self.zoom_reset,
+            "toggle_split":  self.toggle_split,
+            "toggle_sync":   self.toggle_sync,
         }
 
         self.toolbar = Toolbar(self.root, callbacks)
@@ -39,10 +44,19 @@ class App:
         self.statusbar = Statusbar(self.root)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.canvas = PDFCanvas(self.root)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        # Área de conteúdo — troca entre modo único e split
+        self.content_frame = tk.Frame(self.root, bg="#1e1e1e")
+        self.content_frame.pack(fill=tk.BOTH, expand=True)
 
-    # ------------------------------------------------------------------ Ações
+        # Modo único
+        self.single_canvas = PDFCanvas(self.content_frame)
+        self.single_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Split View (começa oculto)
+        self.split_view = SplitView(self.content_frame,
+                                    on_status_change=self._on_panel_status_change)
+
+    # ------------------------------------------------------------------ Modo único
 
     def open_file(self):
         path = filedialog.askopenfilename(
@@ -51,22 +65,25 @@ class App:
         )
         if not path:
             return
-
         try:
             self.doc.open(path)
-            filename = path.split("/")[-1].split("\\")[-1]
-            self.root.title(f"PyReader — {filename}")
+            filename = path.replace("\\", "/").split("/")[-1]
+            self.root.title(f"PyReaderPDF — {filename}")
             self.toolbar.update_page(1, self.doc.total_pages)
             self._render()
+
+            # se split view estiver ativo, abre nos dois painéis
+            if self._split_active:
+                self.split_view.open_in_both(path)
+
         except Exception as e:
             messagebox.showerror("Erro", f"Não foi possível abrir o arquivo.\n{e}")
 
     def _render(self):
-        """Renderiza a página atual e atualiza a interface."""
-        if not self.doc.is_open:
+        if not self.doc.is_open or self._split_active:
             return
         image = self.doc.render_current_page()
-        self.canvas.display(image)
+        self.single_canvas.display(image)
         self.toolbar.update_page(self.doc.page_index + 1, self.doc.total_pages)
         self.statusbar.update(self.doc.page_index + 1, self.doc.total_pages, self.doc.zoom)
 
@@ -86,7 +103,7 @@ class App:
             if self.doc.go_to(page):
                 self._render()
             else:
-                messagebox.showwarning("Aviso", f"Página inválida. O documento tem {self.doc.total_pages} páginas.")
+                messagebox.showwarning("Aviso", f"Página inválida. Total: {self.doc.total_pages}")
         except ValueError:
             messagebox.showwarning("Aviso", "Digite um número de página válido.")
 
@@ -101,3 +118,45 @@ class App:
     def zoom_reset(self):
         self.doc.zoom_reset()
         self._render()
+
+    # ------------------------------------------------------------------ Split View
+
+    def toggle_split(self):
+        self._split_active = not self._split_active
+
+        if self._split_active:
+            self.single_canvas.pack_forget()
+            self.split_view.pack(fill=tk.BOTH, expand=True)
+
+            # se já tiver um arquivo aberto, carrega nos dois painéis
+            if self.doc.is_open:
+                import fitz
+                path = self.doc._doc.name
+                self.split_view.open_in_both(path)
+
+            self.statusbar.set_message("Split View ativo — cada painel tem navegação independente")
+        else:
+            self.split_view.pack_forget()
+            self.single_canvas.pack(fill=tk.BOTH, expand=True)
+            self._sync_active = False
+            self.split_view.set_sync_scroll(False)
+            self.toolbar.set_sync_active(False)
+            self._render()
+
+        self.toolbar.set_split_active(self._split_active)
+
+    def toggle_sync(self):
+        if not self._split_active:
+            return
+        self._sync_active = not self._sync_active
+        self.split_view.set_sync_scroll(self._sync_active)
+        self.toolbar.set_sync_active(self._sync_active)
+
+        msg = "Scroll sincronizado ativado" if self._sync_active else "Scroll sincronizado desativado"
+        self.statusbar.set_message(msg)
+
+    def _on_panel_status_change(self, panel_id: str, current: int, total: int, zoom: float):
+        """Atualiza a statusbar quando um painel muda de página."""
+        self.statusbar.set_message(
+            f"Painel {panel_id} — Página {current} de {total}  |  Zoom: {int(zoom * 100)}%"
+        )
