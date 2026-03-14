@@ -1,15 +1,16 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from core.document import PDFDocument
+from core.history import add_recent
 from ui.toolbar import Toolbar
-from ui.canvas import PDFCanvas
+from ui.tabbar import TabBar
 from ui.statusbar import Statusbar
-from ui.splitview import SplitView
+from ui.home import HomeScreen
+from ui.pdftab import PDFTab
 
 
 class App:
-    """Classe principal — gerencia modo único e modo Split View."""
+    """Classe principal — gerencia abas, home e toolbar."""
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -17,9 +18,9 @@ class App:
         self.root.geometry("1100x750")
         self.root.configure(bg="#1e1e1e")
 
-        self.doc = PDFDocument()
-        self._split_active = False
-        self._sync_active = False
+        self._tabs = {}          # tab_id -> PDFTab
+        self._active_id = "home"
+        self._tab_counter = 0
 
         self._build_ui()
 
@@ -27,163 +28,173 @@ class App:
 
     def _build_ui(self):
         callbacks = {
-            "open":          self.open_file,
-            "prev":          self.prev_page,
-            "next":          self.next_page,
-            "go_to":         self.go_to_page,
-            "zoom_in":       self.zoom_in,
-            "zoom_out":      self.zoom_out,
-            "zoom_reset":    self.zoom_reset,
-            "toggle_split":  self.toggle_split,
-            "toggle_sync":   self.toggle_sync,
+            "open":         self.open_file,
+            "prev":         self.prev_page,
+            "next":         self.next_page,
+            "go_to":        self.go_to_page,
+            "zoom_in":      self.zoom_in,
+            "zoom_out":     self.zoom_out,
+            "zoom_reset":   self.zoom_reset,
+            "toggle_split": self.toggle_split,
+            "toggle_sync":  self.toggle_sync,
         }
 
         self.toolbar = Toolbar(self.root, callbacks)
         self.toolbar.pack(side=tk.TOP, fill=tk.X)
 
+        self.tabbar = TabBar(self.root,
+                             on_select=self._select_tab,
+                             on_close=self._close_tab)
+        self.tabbar.pack(side=tk.TOP, fill=tk.X)
+
         self.statusbar = Statusbar(self.root)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # Área de conteúdo — troca entre modo único e split
-        self.content_frame = tk.Frame(self.root, bg="#1e1e1e")
-        self.content_frame.pack(fill=tk.BOTH, expand=True)
+        self.content = tk.Frame(self.root, bg="#1e1e1e")
+        self.content.pack(fill=tk.BOTH, expand=True)
 
-        # Modo único
-        self.single_canvas = PDFCanvas(
-            self.content_frame,
-            on_zoom=self._handle_zoom,
-            on_page_end=self._scroll_next_page,
-            on_page_start=self._scroll_prev_page,
-        )
-        self.single_canvas.pack(fill=tk.BOTH, expand=True)
+        # Home (sempre presente, só oculta)
+        self.home = HomeScreen(self.content, on_open=self.open_path)
+        self.home.pack(fill=tk.BOTH, expand=True)
 
-        # Split View (começa oculto)
-        self.split_view = SplitView(self.content_frame,
-                                    on_status_change=self._on_panel_status_change)
+        self.toolbar.set_pdf_controls_enabled(False)
 
-    # ------------------------------------------------------------------ Modo único
+    # ------------------------------------------------------------------ Abrir arquivo
 
     def open_file(self):
         path = filedialog.askopenfilename(
             title="Selecionar PDF",
             filetypes=[("Arquivos PDF", "*.pdf")]
         )
-        if not path:
-            return
-        try:
-            self.doc.open(path)
-            filename = path.replace("\\", "/").split("/")[-1]
-            self.root.title(f"PyReaderPDF — {filename}")
-            self.toolbar.update_page(1, self.doc.total_pages)
-            self._render()
+        if path:
+            self.open_path(path)
 
-            # se split view estiver ativo, abre nos dois painéis
-            if self._split_active:
-                self.split_view.open_in_both(path)
+    def open_path(self, path: str):
+        # Se já está aberto em alguma aba, só ativa
+        for tab_id, tab in self._tabs.items():
+            if tab.path == path:
+                self._select_tab(tab_id)
+                return
 
-        except Exception as e:
-            messagebox.showerror("Erro", f"Não foi possível abrir o arquivo.\n{e}")
+        self._tab_counter += 1
+        tab_id = f"tab_{self._tab_counter}"
+        filename = path.replace("\\", "/").split("/")[-1]
+        short = filename if len(filename) <= 20 else filename[:17] + "..."
 
-    def _render(self, scroll_to_bottom: bool = False):
-        if not self.doc.is_open or self._split_active:
-            return
-        image = self.doc.render_current_page()
-        self.single_canvas.display(image)
-        if scroll_to_bottom:
-            self.single_canvas.scroll_to_bottom()
+        tab = PDFTab(self.content, path,
+                     on_status_change=lambda c, t, z, tid=tab_id: self._on_status(tid, c, t, z))
+        self._tabs[tab_id] = tab
+
+        self.tabbar.add_tab(tab_id, short)
+        add_recent(path)
+        self.home.refresh()
+        self._select_tab(tab_id)
+
+    # ------------------------------------------------------------------ Gerenciar abas
+
+    def _select_tab(self, tab_id: str):
+        # Oculta conteúdo atual
+        if self._active_id == "home":
+            self.home.pack_forget()
+        elif self._active_id in self._tabs:
+            self._tabs[self._active_id].pack_forget()
+
+        self._active_id = tab_id
+        self.tabbar.set_active(tab_id)
+
+        if tab_id == "home":
+            self.home.pack(fill=tk.BOTH, expand=True)
+            self.toolbar.set_pdf_controls_enabled(False)
+            self.statusbar.set_message("Início")
+            self.root.title("PyReaderPDF")
         else:
-            self.single_canvas.scroll_to_top()
-        self.toolbar.update_page(self.doc.page_index + 1, self.doc.total_pages)
-        self.statusbar.update(self.doc.page_index + 1, self.doc.total_pages, self.doc.zoom)
+            tab = self._tabs[tab_id]
+            tab.pack(fill=tk.BOTH, expand=True)
+            self.toolbar.set_pdf_controls_enabled(True)
+            self.toolbar.set_split_active(tab.split_active)
+            self.toolbar.set_sync_active(tab.sync_active)
+            self.toolbar.update_page(tab.current_page, tab.total_pages)
+            self.statusbar.update(tab.current_page, tab.total_pages, tab.doc.zoom)
+            self.root.title(f"PyReaderPDF — {tab.filename}")
 
-    def _scroll_next_page(self):
-        if self.doc.next_page():
-            self._render(scroll_to_bottom=False)
+    def _close_tab(self, tab_id: str):
+        if tab_id not in self._tabs:
+            return
 
-    def _scroll_prev_page(self):
-        if self.doc.prev_page():
-            self._render(scroll_to_bottom=True)
+        self._tabs[tab_id].destroy()
+        del self._tabs[tab_id]
+        self.tabbar.remove_tab(tab_id)
 
-    def _handle_zoom(self, delta: int):
-        if delta > 0:
-            self.doc.zoom_in()
-        else:
-            self.doc.zoom_out()
-        if self.doc.is_open:
-            image = self.doc.render_current_page()
-            self.single_canvas.display(image, keep_position=True)
-            self.statusbar.update(self.doc.page_index + 1, self.doc.total_pages, self.doc.zoom)
+        if self._active_id == tab_id:
+            # Ativa a última aba aberta, ou home
+            remaining = list(self._tabs.keys())
+            next_id = remaining[-1] if remaining else "home"
+            self._active_id = None
+            self._select_tab(next_id)
+
+    def _active_tab(self):
+        """Retorna o PDFTab ativo, ou None se for home."""
+        if self._active_id in self._tabs:
+            return self._tabs[self._active_id]
+        return None
+
+    def _on_status(self, tab_id: str, current: int, total: int, zoom: float):
+        if tab_id == self._active_id:
+            self.toolbar.update_page(current, total)
+            self.statusbar.update(current, total, zoom)
+
+    # ------------------------------------------------------------------ Ações da toolbar
 
     def next_page(self):
-        if self.doc.next_page():
-            self._render()
+        tab = self._active_tab()
+        if tab:
+            tab.next_page()
 
     def prev_page(self):
-        if self.doc.prev_page():
-            self._render()
+        tab = self._active_tab()
+        if tab:
+            tab.prev_page()
 
     def go_to_page(self, event=None):
-        if not self.doc.is_open:
+        tab = self._active_tab()
+        if not tab:
             return
         try:
             page = int(self.toolbar.get_page_input())
-            if self.doc.go_to(page):
-                self._render()
-            else:
-                messagebox.showwarning("Aviso", f"Página inválida. Total: {self.doc.total_pages}")
+            if not tab.go_to(page):
+                messagebox.showwarning("Aviso", f"Página inválida. Total: {tab.total_pages}")
         except ValueError:
             messagebox.showwarning("Aviso", "Digite um número de página válido.")
 
     def zoom_in(self):
-        self.doc.zoom_in()
-        self._render()
+        tab = self._active_tab()
+        if tab:
+            tab.zoom_in()
 
     def zoom_out(self):
-        self.doc.zoom_out()
-        self._render()
+        tab = self._active_tab()
+        if tab:
+            tab.zoom_out()
 
     def zoom_reset(self):
-        self.doc.zoom_reset()
-        self._render()
-
-    # ------------------------------------------------------------------ Split View
+        tab = self._active_tab()
+        if tab:
+            tab.zoom_reset()
 
     def toggle_split(self):
-        self._split_active = not self._split_active
-
-        if self._split_active:
-            self.single_canvas.pack_forget()
-            self.split_view.pack(fill=tk.BOTH, expand=True)
-
-            # se já tiver um arquivo aberto, carrega nos dois painéis
-            if self.doc.is_open:
-                import fitz
-                path = self.doc._doc.name
-                self.split_view.open_in_both(path)
-
-            self.statusbar.set_message("Split View ativo — cada painel tem navegação independente")
-        else:
-            self.split_view.pack_forget()
-            self.single_canvas.pack(fill=tk.BOTH, expand=True)
-            self._sync_active = False
-            self.split_view.set_sync_scroll(False)
-            self.toolbar.set_sync_active(False)
-            self._render()
-
-        self.toolbar.set_split_active(self._split_active)
-
-    def toggle_sync(self):
-        if not self._split_active:
+        tab = self._active_tab()
+        if not tab:
             return
-        self._sync_active = not self._sync_active
-        self.split_view.set_sync_scroll(self._sync_active)
-        self.toolbar.set_sync_active(self._sync_active)
-
-        msg = "Scroll sincronizado ativado" if self._sync_active else "Scroll sincronizado desativado"
+        active = tab.toggle_split()
+        self.toolbar.set_split_active(active)
+        msg = "Split View ativo" if active else "Split View desativado"
         self.statusbar.set_message(msg)
 
-    def _on_panel_status_change(self, panel_id: str, current: int, total: int, zoom: float):
-        """Atualiza a statusbar quando um painel muda de página."""
-        self.statusbar.set_message(
-            f"Painel {panel_id} — Página {current} de {total}  |  Zoom: {int(zoom * 100)}%"
-        )
+    def toggle_sync(self):
+        tab = self._active_tab()
+        if not tab:
+            return
+        active = tab.toggle_sync()
+        self.toolbar.set_sync_active(active)
+        msg = "Scroll sincronizado ativado" if active else "Scroll sincronizado desativado"
+        self.statusbar.set_message(msg)
