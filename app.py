@@ -213,7 +213,13 @@ class App(QMainWindow):
         if tab: tab.zoom_reset()
 
     def toggle_view_mode(self):
-        self._statusbar.set_message("Modo contínuo chega na Fase 3")
+        tab = self._active_tab()
+        if not tab:
+            return
+        mode = tab.toggle_view_mode()
+        self._toolbar.set_view_mode(mode)
+        label = "Modo contínuo ativado" if mode == "continuous" else "Modo página única ativado"
+        self._statusbar.set_message(label)
 
     def add_active_to_library(self):
         path = self._current_path()
