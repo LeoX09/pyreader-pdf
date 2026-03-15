@@ -1,104 +1,166 @@
-import tkinter as tk
+from PySide6.QtWidgets import QToolBar, QLabel, QLineEdit, QPushButton, QWidget, QSizePolicy
+from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QIntValidator
 
 
-class Toolbar(tk.Frame):
+class Toolbar(QToolBar):
     """Barra de ferramentas principal."""
 
-    def __init__(self, parent, callbacks: dict):
-        super().__init__(parent, bg="#2d2d2d", pady=6)
-        self._callbacks  = callbacks
-        self._pdf_widgets = []
+    # Signals
+    open_requested       = Signal()
+    prev_requested       = Signal()
+    next_requested       = Signal()
+    go_to_requested      = Signal(int)
+    zoom_in_requested    = Signal()
+    zoom_out_requested   = Signal()
+    zoom_reset_requested = Signal()
+    view_mode_toggled    = Signal()
+    add_library_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMovable(False)
+        self.setStyleSheet(self._style())
         self._build()
 
+    # ------------------------------------------------------------------ Build
+
     def _build(self):
-        btn = {"bg": "#3a3a3a", "fg": "white", "relief": "flat",
-               "padx": 10, "pady": 4, "cursor": "hand2",
-               "activebackground": "#505050", "activeforeground": "white"}
+        def btn(text, signal, tooltip=""):
+            b = QPushButton(text)
+            b.setToolTip(tooltip)
+            b.clicked.connect(signal)
+            b.setFixedHeight(28)
+            return b
 
         def sep():
-            tk.Frame(self, bg="#555", width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+            s = QWidget()
+            s.setFixedWidth(1)
+            s.setStyleSheet("background:#444;")
+            self.addWidget(s)
+            sp = QWidget()
+            sp.setFixedWidth(6)
+            self.addWidget(sp)
 
-        tk.Button(self, text="Abrir PDF",
-                  command=self._callbacks["open"], **btn).pack(side=tk.LEFT, padx=(8, 4))
-
+        # Abrir
+        self.addWidget(btn("Abrir PDF", self.open_requested, "Abrir arquivo PDF"))
         sep()
 
-        self.btn_prev = tk.Button(self, text="◀", command=self._callbacks["prev"], **btn)
-        self.btn_prev.pack(side=tk.LEFT, padx=2)
-
-        self.btn_next = tk.Button(self, text="▶", command=self._callbacks["next"], **btn)
-        self.btn_next.pack(side=tk.LEFT, padx=2)
-
+        # Navegação
+        self.btn_prev = btn("◀", self.prev_requested, "Página anterior")
+        self.btn_next = btn("▶", self.next_requested, "Próxima página")
+        self.addWidget(self.btn_prev)
+        self.addWidget(self.btn_next)
         sep()
 
-        tk.Label(self, text="Página:", bg="#2d2d2d", fg="#aaa").pack(side=tk.LEFT)
-        self.page_entry = tk.Entry(self, width=5, bg="#3a3a3a", fg="white",
-                                   insertbackground="white", relief="flat")
-        self.page_entry.pack(side=tk.LEFT, padx=(4, 2))
-        self.page_entry.bind("<Return>", self._callbacks["go_to"])
+        # Campo de página
+        self.addWidget(QLabel("  Pág."))
+        self._page_edit = QLineEdit()
+        self._page_edit.setFixedWidth(48)
+        self._page_edit.setAlignment(Qt.AlignCenter)
+        self._page_edit.setValidator(QIntValidator(1, 99999))
+        self._page_edit.returnPressed.connect(self._on_go_to)
+        self.addWidget(self._page_edit)
 
-        self.total_label = tk.Label(self, text="/ -", bg="#2d2d2d", fg="#aaa")
-        self.total_label.pack(side=tk.LEFT)
-
+        self._total_label = QLabel("/ -  ")
+        self.addWidget(self._total_label)
         sep()
 
-        self.btn_zoom_out   = tk.Button(self, text="−", command=self._callbacks["zoom_out"],   **btn)
-        self.btn_zoom_out.pack(side=tk.LEFT, padx=2)
-        self.btn_zoom_in    = tk.Button(self, text="+", command=self._callbacks["zoom_in"],    **btn)
-        self.btn_zoom_in.pack(side=tk.LEFT, padx=2)
-        self.btn_zoom_reset = tk.Button(self, text="100%", command=self._callbacks["zoom_reset"], **btn)
-        self.btn_zoom_reset.pack(side=tk.LEFT, padx=2)
-
+        # Zoom
+        self.btn_zoom_out   = btn("−",    self.zoom_out_requested,   "Zoom out  (Ctrl+Scroll)")
+        self.btn_zoom_reset = btn("100%", self.zoom_reset_requested,  "Zoom 100%")
+        self.btn_zoom_in    = btn("+",    self.zoom_in_requested,    "Zoom in  (Ctrl+Scroll)")
+        self.addWidget(self.btn_zoom_out)
+        self.addWidget(self.btn_zoom_reset)
+        self.addWidget(self.btn_zoom_in)
         sep()
 
-        self.btn_view_mode = tk.Button(self, text="☰ Contínuo",
-                                       command=self._callbacks.get("toggle_view_mode", lambda: None),
-                                       **btn)
-        self.btn_view_mode.pack(side=tk.LEFT, padx=2)
-
+        # Modo de visualização
+        self.btn_view = btn("☰ Contínuo", self.view_mode_toggled, "Alternar modo contínuo / página única")
+        self.addWidget(self.btn_view)
         sep()
 
-        self.btn_add_lib = tk.Button(self, text="+ Biblioteca",
-                                     command=self._callbacks.get("add_to_library", lambda: None),
-                                     **btn)
-        self.btn_add_lib.pack(side=tk.LEFT, padx=2)
+        # Biblioteca
+        self.addWidget(btn("+ Biblioteca", self.add_library_requested, "Adicionar à biblioteca"))
 
-        # Dica de atalhos no canto direito
-        tk.Label(self, text="Ctrl+D  duplicar  |  Ctrl+W  fechar split",
-                 bg="#2d2d2d", fg="#444", font=("Arial", 8)).pack(side=tk.RIGHT, padx=12)
+        # Espaço flexível + dica de atalhos
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.addWidget(spacer)
+        hint = QLabel("Ctrl+D  duplicar  |  Drag aba → Split View  |  Ctrl+W  fechar split  ")
+        hint.setStyleSheet("color: #444; font-size: 8pt;")
+        self.addWidget(hint)
 
-        self._pdf_widgets = [
-            self.btn_prev, self.btn_next, self.page_entry,
+        self._set_pdf_widgets([
+            self.btn_prev, self.btn_next, self._page_edit,
             self.btn_zoom_in, self.btn_zoom_out, self.btn_zoom_reset,
-            self.btn_view_mode, self.btn_add_lib,
-        ]
+            self.btn_view,
+        ])
 
-    # ------------------------------------------------------------------ Estado
+    # ------------------------------------------------------------------ API pública
 
-    def set_pdf_controls_enabled(self, enabled: bool):
-        state = tk.NORMAL if enabled else tk.DISABLED
-        fg    = "white"   if enabled else "#555"
+    def set_pdf_enabled(self, enabled: bool):
         for w in self._pdf_widgets:
-            try:
-                w.config(state=state, fg=fg)
-            except Exception:
-                pass
+            w.setEnabled(enabled)
         if not enabled:
-            self.total_label.config(text="/ -")
-            self.page_entry.delete(0, tk.END)
+            self._page_edit.clear()
+            self._total_label.setText("/ -  ")
+
+    def update_page(self, current: int, total: int):
+        self._page_edit.setText(str(current))
+        self._total_label.setText(f"/ {total}  ")
 
     def set_view_mode(self, mode: str):
         if mode == "continuous":
-            self.btn_view_mode.config(bg="#1a4f6b", activebackground="#1f6080",
-                                      text="☰ Contínuo ✓")
+            self.btn_view.setText("☰ Contínuo ✓")
+            self.btn_view.setProperty("active", True)
         else:
-            self.btn_view_mode.config(bg="#3a3a3a", activebackground="#505050",
-                                      text="☰ Contínuo")
+            self.btn_view.setText("☰ Contínuo")
+            self.btn_view.setProperty("active", False)
+        self.btn_view.style().unpolish(self.btn_view)
+        self.btn_view.style().polish(self.btn_view)
 
-    def update_page(self, current: int, total: int):
-        self.page_entry.delete(0, tk.END)
-        self.page_entry.insert(0, str(current))
-        self.total_label.config(text=f"/ {total}")
+    # ------------------------------------------------------------------ Internos
 
-    def get_page_input(self) -> str:
-        return self.page_entry.get()
+    def _set_pdf_widgets(self, widgets):
+        self._pdf_widgets = widgets
+
+    def _on_go_to(self):
+        try:
+            page = int(self._page_edit.text())
+            self.go_to_requested.emit(page)
+        except ValueError:
+            pass
+
+    # ------------------------------------------------------------------ Estilo
+
+    def _style(self):
+        return """
+        QToolBar {
+            background: #2d2d2d;
+            border: none;
+            padding: 4px 6px;
+            spacing: 3px;
+        }
+        QPushButton {
+            background: #3a3a3a;
+            color: #e0e0e0;
+            border: none;
+            border-radius: 4px;
+            padding: 3px 10px;
+            font-size: 9pt;
+        }
+        QPushButton:hover    { background: #505050; }
+        QPushButton:pressed  { background: #222; }
+        QPushButton:disabled { color: #555; background: #2a2a2a; }
+        QPushButton[active=true] { background: #1a4f6b; }
+        QLineEdit {
+            background: #3a3a3a;
+            color: #e0e0e0;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 9pt;
+        }
+        QLabel { color: #aaa; font-size: 9pt; background: transparent; }
+        """

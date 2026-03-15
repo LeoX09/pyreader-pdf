@@ -1,78 +1,62 @@
 import tkinter as tk
-from PIL import ImageTk
+from PIL import ImageTk, Image
 import threading
 
 
 class ContinuousCanvas(tk.Frame):
-    """
-    Visualização contínua — todas as páginas empilhadas verticalmente.
-    Usa lazy loading: só renderiza páginas próximas da área visível.
-    """
-
-    PAGE_GAP = 12          # espaço entre páginas (px)
-    PRELOAD_MARGIN = 800   # px acima/abaixo da viewport para pré-carregar
+    PAGE_GAP        = 12
+    PRELOAD_MARGIN  = 800
+    HIRES_DELAY_MS  = 300
 
     def __init__(self, parent, doc, on_zoom=None, on_page_change=None):
         super().__init__(parent, bg="#181818")
-
-        self._doc = doc
-        self._on_zoom = on_zoom
-        self._on_page_change = on_page_change  # callback(page_index)
-
-        self._page_images = {}    # page_index -> ImageTk.PhotoImage
-        self._page_items = {}     # page_index -> canvas item id
-        self._page_tops = []      # y inicial de cada página (calculado)
-        self._page_heights = []   # altura renderizada de cada página
-        self._loading = set()     # páginas em processo de carregamento
-        self._current_page = 0
-
+        self._doc            = doc
+        self._on_zoom        = on_zoom
+        self._on_page_change = on_page_change
+        self._source_images  = {}
+        self._page_photos    = {}
+        self._page_items     = {}
+        self._page_tops      = []
+        self._page_heights   = []
+        self._loading        = set()
+        self._stale_pages    = set()  # páginas com zoom desatualizado, aguardando hi-res
+        self._current_page   = 0
+        self._hires_timer    = None
         self._build()
-
-    # ------------------------------------------------------------------ UI
 
     def _build(self):
         self.canvas = tk.Canvas(self, bg="#181818", highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._scrollbar = tk.Scrollbar(self, orient=tk.VERTICAL,
-                                       command=self._on_scroll_command)
-        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.configure(yscrollcommand=self._scrollbar.set)
-
+        sb = tk.Scrollbar(self, orient=tk.VERTICAL, command=self._on_scroll_cmd)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.configure(yscrollcommand=sb.set)
         self.canvas.bind("<MouseWheel>", self._handle_scroll)
-        self.canvas.bind("<Configure>", self._on_resize)
-
-    # ------------------------------------------------------------------ Inicialização
+        self.canvas.bind("<Configure>",  self._on_resize)
 
     def load(self):
-        """Carrega o documento — calcula layout e renderiza páginas iniciais."""
-        if not self._doc.is_open:
-            return
-
-        self._page_images.clear()
+        self._source_images.clear()
+        self._page_photos.clear()
         self._page_items.clear()
         self._page_tops.clear()
         self._page_heights.clear()
         self._loading.clear()
+        self._stale_pages.clear()
         self.canvas.delete("all")
-
         self._calculate_layout()
         self._update_scrollregion()
         self.canvas.after(50, self._lazy_load)
 
     def _calculate_layout(self):
-        """Calcula a posição Y de cada página com base no zoom atual."""
         import fitz
         y = self.PAGE_GAP
         for i in range(self._doc.total_pages):
             page = self._doc._doc[i]
-            w = int(page.rect.width * self._doc.zoom)
-            h = int(page.rect.height * self._doc.zoom)
             self._page_tops.append(y)
+            h = int(page.rect.height * self._doc.zoom)
             self._page_heights.append(h)
             y += h + self.PAGE_GAP
 
-    def _total_height(self) -> int:
+    def _total_height(self):
         if not self._page_tops:
             return 0
         return self._page_tops[-1] + self._page_heights[-1] + self.PAGE_GAP
@@ -81,69 +65,140 @@ class ContinuousCanvas(tk.Frame):
         canvas_w = max(self.canvas.winfo_width(), 800)
         self.canvas.config(scrollregion=(0, 0, canvas_w, self._total_height()))
 
-    # ------------------------------------------------------------------ Lazy loading
+    # ------------------------------------------------------------------ Lazy load
 
     def _lazy_load(self):
-        """Renderiza páginas visíveis + margem de pré-carregamento."""
         if not self._doc.is_open or not self._page_tops:
             return
-
-        # Viewport em coordenadas do canvas
-        view = self.canvas.yview()
+        view    = self.canvas.yview()
         total_h = self._total_height()
-        top_y    = view[0] * total_h - self.PRELOAD_MARGIN
-        bottom_y = view[1] * total_h + self.PRELOAD_MARGIN
-
+        top_y   = view[0] * total_h - self.PRELOAD_MARGIN
+        bot_y   = view[1] * total_h + self.PRELOAD_MARGIN
         for i in range(self._doc.total_pages):
-            page_top    = self._page_tops[i]
-            page_bottom = page_top + self._page_heights[i]
+            in_view = (self._page_tops[i] + self._page_heights[i] >= top_y and
+                       self._page_tops[i] <= bot_y)
+            needs_render = i not in self._source_images or i in self._stale_pages
+            if in_view and needs_render and i not in self._loading:
+                self._render_hires(i)
 
-            in_view = page_bottom >= top_y and page_top <= bottom_y
-
-            if in_view and i not in self._page_images and i not in self._loading:
-                self._load_page(i)
-
-    def _load_page(self, index: int):
-        """Renderiza uma página em thread separada."""
+    def _render_hires(self, index: int):
         self._loading.add(index)
+        zoom = self._doc.zoom
 
-        def render():
+        def worker():
             try:
                 import fitz
                 page = self._doc._doc[index]
-                mat = fitz.Matrix(self._doc.zoom, self._doc.zoom)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                from PIL import Image
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                self.canvas.after(0, lambda: self._place_page(index, img))
+                pix  = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+                img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                self.canvas.after(0, lambda: self._on_hires_ready(index, img, zoom))
             except Exception:
                 self._loading.discard(index)
 
-        threading.Thread(target=render, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
-    def _place_page(self, index: int, img):
-        """Coloca a página renderizada no canvas (roda na thread principal)."""
+    def _on_hires_ready(self, index: int, img: Image.Image, zoom_at_render: float):
+        self._loading.discard(index)
         if not self._doc.is_open:
             return
+        if zoom_at_render != self._doc.zoom:
+            return  # zoom mudou enquanto renderizava — descarta
+        self._source_images[index] = img
+        self._stale_pages.discard(index)  # hi-res atualizada — não é mais stale
+        self._put_photo(index, img)
 
+    # ------------------------------------------------------------------ Zoom suave
+
+    def reload_zoom(self):
+        current = self._current_page
+
+        # Recalcula layout
+        self._page_tops.clear()
+        self._page_heights.clear()
+        self._calculate_layout()
+        self._update_scrollregion()
+
+        # Preview instantâneo das páginas visíveis
+        self._apply_instant_preview()
+
+        # Reposiciona tudo
+        self._reposition_items()
+
+        # Volta para a página atual
+        self.canvas.after(10, lambda: self.go_to_page(current))
+
+        # Agenda hi-res com debounce
+        self._schedule_hires_reload()
+
+    def _apply_instant_preview(self):
+        """
+        Resize NEAREST nas imagens já carregadas — instantâneo.
+        Só processa páginas próximas da viewport.
+        """
+        zoom    = self._doc.zoom
+        view    = self.canvas.yview()
+        total_h = self._total_height()
+        top_y   = view[0] * total_h - 200
+        bot_y   = view[1] * total_h + 200
+
+        for index, src in self._source_images.items():
+            if index >= len(self._page_tops):
+                continue
+            in_view = (self._page_tops[index] + self._page_heights[index] >= top_y and
+                       self._page_tops[index] <= bot_y)
+            if not in_view:
+                continue
+            try:
+                page  = self._doc._doc[index]
+                new_w = int(page.rect.width  * zoom)
+                new_h = int(page.rect.height * zoom)
+                preview = src.resize((new_w, new_h), Image.NEAREST)
+                self._put_photo(index, preview)
+            except Exception:
+                pass
+
+    def _put_photo(self, index: int, img: Image.Image):
         photo = ImageTk.PhotoImage(img)
-        self._page_images[index] = photo
-        self._loading.discard(index)
-
+        self._page_photos[index] = photo
         canvas_w = self.canvas.winfo_width() or 800
         x = max(canvas_w // 2, img.width // 2)
-        y = self._page_tops[index]
-
-        # Remove item anterior se existia (ex: após zoom)
+        y = self._page_tops[index] if index < len(self._page_tops) else 0
         if index in self._page_items:
-            self.canvas.delete(self._page_items[index])
+            self.canvas.itemconfig(self._page_items[index], image=photo)
+            self.canvas.coords(self._page_items[index], x, y)
+        else:
+            item_id = self.canvas.create_image(x, y, anchor=tk.N, image=photo)
+            self._page_items[index] = item_id
 
-        item_id = self.canvas.create_image(x, y, anchor=tk.N, image=photo)
-        self._page_items[index] = item_id
+    def _reposition_items(self):
+        canvas_w = self.canvas.winfo_width() or 800
+        for index, item_id in self._page_items.items():
+            if index < len(self._page_tops):
+                photo = self._page_photos.get(index)
+                x = max(canvas_w // 2, (photo.width() if photo else 400) // 2)
+                self.canvas.coords(item_id, x, self._page_tops[index])
+
+    # ------------------------------------------------------------------ Debounce hi-res
+
+    def _schedule_hires_reload(self):
+        if self._hires_timer is not None:
+            self.canvas.after_cancel(self._hires_timer)
+        self._hires_timer = self.canvas.after(self.HIRES_DELAY_MS, self._do_hires_reload)
+
+    def _do_hires_reload(self):
+        """
+        Marca todas as páginas como stale — precisam de nova hi-res.
+        NÃO limpa _source_images: a imagem antiga (preview) continua
+        visível na tela até a nova hi-res substituí-la individualmente.
+        """
+        self._hires_timer = None
+        self._stale_pages.update(range(self._doc.total_pages))
+        self._loading.clear()
+        self._lazy_load()
 
     # ------------------------------------------------------------------ Scroll
 
-    def _on_scroll_command(self, *args):
+    def _on_scroll_cmd(self, *args):
         self.canvas.yview(*args)
         self._after_scroll()
 
@@ -152,34 +207,28 @@ class ContinuousCanvas(tk.Frame):
         self._update_current_page()
 
     def _handle_scroll(self, event):
-        # Ctrl + Scroll = zoom
         if event.state & 0x0004:
             delta = 1 if event.delta > 0 else -1
             if self._on_zoom:
                 self._on_zoom(delta)
             return
-
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         self._after_scroll()
 
     def _update_current_page(self):
-        """Detecta qual página está mais visível e notifica."""
         if not self._page_tops:
             return
-
-        view = self.canvas.yview()
+        view    = self.canvas.yview()
         total_h = self._total_height()
-        mid_y = (view[0] + view[1]) / 2 * total_h
-
+        mid_y   = (view[0] + view[1]) / 2 * total_h
         current = 0
         for i, top in enumerate(self._page_tops):
             if top <= mid_y:
                 current = i
             else:
                 break
-
         if current != self._current_page:
-            self._current_page = current
+            self._current_page   = current
             self._doc.page_index = current
             if self._on_page_change:
                 self._on_page_change(current)
@@ -187,45 +236,24 @@ class ContinuousCanvas(tk.Frame):
     # ------------------------------------------------------------------ Navegação
 
     def go_to_page(self, index: int):
-        """Salta para uma página pelo índice (0-based)."""
         if not self._page_tops or index >= len(self._page_tops):
             return
         total_h = self._total_height()
         if total_h == 0:
             return
-        frac = self._page_tops[index] / total_h
-        self.canvas.yview_moveto(frac)
-        self._current_page = index
+        self.canvas.yview_moveto(self._page_tops[index] / total_h)
+        self._current_page   = index
         self._doc.page_index = index
         self._lazy_load()
-
-    # ------------------------------------------------------------------ Zoom
-
-    def reload_zoom(self):
-        """Recalcula layout e recarrega todas as páginas após mudança de zoom."""
-        current = self._current_page
-        self._page_images.clear()
-        self._page_items.clear()
-        self._page_tops.clear()
-        self._page_heights.clear()
-        self._loading.clear()
-        self.canvas.delete("all")
-        self._calculate_layout()
-        self._update_scrollregion()
-        self.canvas.after(30, lambda: self.go_to_page(current))
-        self.canvas.after(60, self._lazy_load)
 
     # ------------------------------------------------------------------ Resize
 
     def _on_resize(self, event):
         self._update_scrollregion()
-        # Reposiciona itens já renderizados
+        canvas_w = event.width
         for index, item_id in self._page_items.items():
-            if index in self._page_images:
-                img = self._page_images[index]
-                canvas_w = event.width
-                # Calcula largura da imagem a partir do item
-                x = max(canvas_w // 2,
-                        getattr(img, 'width', canvas_w // 2))
+            photo = self._page_photos.get(index)
+            if photo and index < len(self._page_tops):
+                x = max(canvas_w // 2, photo.width() // 2)
                 self.canvas.coords(item_id, x, self._page_tops[index])
         self._lazy_load()
