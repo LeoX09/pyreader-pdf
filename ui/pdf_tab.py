@@ -1,4 +1,5 @@
 import fitz
+import core.config as config
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QStackedWidget
 from PySide6.QtCore import Signal, Qt
 
@@ -20,7 +21,7 @@ class PDFTab(QWidget):
         self.path      = path
         self.filename  = path.replace("\\", "/").split("/")[-1]
         self._doc      = None
-        self._mode     = MODE_SINGLE
+        self._mode     = config.get('view_mode') or MODE_CONTINUOUS
         self._single   = None
         self._continuous = None
         self._stack    = None
@@ -32,7 +33,7 @@ class PDFTab(QWidget):
         layout.setSpacing(0)
 
         try:
-            self._doc = fitz.open(path)
+            self._doc  = fitz.open(path)
 
             self._stack = QStackedWidget(self)
 
@@ -46,7 +47,13 @@ class PDFTab(QWidget):
 
             self._stack.addWidget(self._single)      # index 0
             self._stack.addWidget(self._continuous)  # index 1
-            self._stack.setCurrentIndex(0)
+
+            # Aplica o modo inicial da config
+            if self._mode == MODE_CONTINUOUS:
+                self._stack.setCurrentIndex(1)
+            else:
+                self._stack.setCurrentIndex(0)
+
             layout.addWidget(self._stack)
 
         except Exception as e:

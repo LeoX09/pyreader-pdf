@@ -12,6 +12,8 @@ from ui.home import HomeScreen
 from ui.statusbar import Statusbar
 from ui.pdf_tab import PDFTab, MODE_SINGLE, MODE_CONTINUOUS
 from ui.split_view import SplitView
+from ui.settings import SettingsDialog
+import core.config as config
 
 
 # ------------------------------------------------------------------ Drop overlay
@@ -103,7 +105,7 @@ class App(QMainWindow):
         self._split_widget = None
         self._split_tabs   = []
         self._drop_overlay = None
-        self._global_mode  = MODE_SINGLE   # modo de visualização global
+
 
         self._build_ui()
         self._bind_shortcuts()
@@ -144,8 +146,8 @@ class App(QMainWindow):
         self._toolbar.zoom_in_requested.connect(self.zoom_in)
         self._toolbar.zoom_out_requested.connect(self.zoom_out)
         self._toolbar.zoom_reset_requested.connect(self.zoom_reset)
-        self._toolbar.view_mode_toggled.connect(self.toggle_view_mode)
         self._toolbar.add_library_requested.connect(self.add_active_to_library)
+        self._toolbar.settings_requested.connect(self.open_settings)
 
     def _bind_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+O"),     self).activated.connect(self.open_file)
@@ -184,10 +186,6 @@ class App(QMainWindow):
         tab = PDFTab(path, self)
         tab.page_changed.connect(self._on_page_changed)
         tab.zoom_changed.connect(self._on_zoom_changed)
-
-        # Aplica o modo global
-        if self._global_mode == MODE_CONTINUOUS:
-            tab.toggle_view_mode()
 
         idx = self._tabs.addTab(tab, short)
         self._tab_paths[idx] = path
@@ -300,11 +298,6 @@ class App(QMainWindow):
         left_tab  = PDFTab(left_path,  self)
         right_tab = PDFTab(right_path, self)
 
-        # Aplica modo global em ambos os painéis
-        if self._global_mode == MODE_CONTINUOUS:
-            left_tab.toggle_view_mode()
-            right_tab.toggle_view_mode()
-
         self._split_tabs = [left_tab, right_tab]
 
         split = SplitView(left_tab, right_tab, left_name, right_name, self)
@@ -367,7 +360,7 @@ class App(QMainWindow):
             self.setWindowTitle(f"PyReaderPDF — {w.filename}")
             self._toolbar.set_pdf_enabled(True)
             self._toolbar.update_page(w.current_page, w.total_pages)
-            self._toolbar.set_view_mode(w.view_mode)
+            self._toolbar.update_zoom(w.zoom)
             self._statusbar.update(w.current_page, w.total_pages, w.zoom)
         else:
             self.setWindowTitle("PyReaderPDF")
@@ -391,6 +384,7 @@ class App(QMainWindow):
         tab = self._active_tab()
         if tab:
             self._statusbar.update(tab.current_page, tab.total_pages, zoom)
+            self._toolbar.update_zoom(zoom)
 
     def prev_page(self):
         tab = self._active_tab()
@@ -417,27 +411,22 @@ class App(QMainWindow):
         tab = self._active_tab()
         if tab: tab.zoom_reset()
 
-    def toggle_view_mode(self):
-        """Alterna o modo global e aplica em todas as abas abertas."""
-        self._global_mode = (
-            MODE_CONTINUOUS if self._global_mode == MODE_SINGLE else MODE_SINGLE)
-        self._toolbar.set_view_mode(self._global_mode)
+    def open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.settings_changed.connect(self._apply_settings)
+        dlg.exec()
 
-        # Aplica em todas as abas abertas
+    def _apply_settings(self):
+        """Aplica novas configurações em todas as abas abertas."""
+        mode = config.get("view_mode")
         for i in range(self._tabs.count()):
             w = self._tabs.widget(i)
-            if isinstance(w, PDFTab) and w.view_mode != self._global_mode:
+            if isinstance(w, PDFTab) and w.view_mode != mode:
                 w.toggle_view_mode()
-
-        # Aplica nos painéis do split se estiver ativo
         for tab in self._split_tabs:
-            if tab.view_mode != self._global_mode:
+            if tab.view_mode != mode:
                 tab.toggle_view_mode()
-
-        label = ("Modo contínuo ativado (global)"
-                 if self._global_mode == MODE_CONTINUOUS
-                 else "Modo página única ativado (global)")
-        self._statusbar.set_message(label)
+        self._statusbar.set_message("Configurações salvas")
 
     def add_active_to_library(self):
         tab = self._active_tab()
