@@ -9,6 +9,7 @@ from core.library import add_to_library
 from ui.toolbar import Toolbar
 from ui.home import HomeScreen
 from ui.statusbar import Statusbar
+from ui.pdf_tab import PDFTab
 
 
 class App(QMainWindow):
@@ -101,14 +102,15 @@ class App(QMainWindow):
         if title_suffix:
             short += f" {title_suffix}"
 
-        # Placeholder — será substituído por PDFTab na Fase 2
-        placeholder = QWidget()
-        placeholder.setStyleSheet("background:#1e1e1e;")
+        tab = PDFTab(path, self)
+        tab.page_changed.connect(
+            lambda c, t, idx=None: self._on_page_changed(c, t))
+        tab.zoom_changed.connect(
+            lambda z, idx=None: self._on_zoom_changed(z))
 
-        idx = self._tabs.addTab(placeholder, short)
+        idx = self._tabs.addTab(tab, short)
         self._tab_paths[idx] = path
         self._tabs.setCurrentIndex(idx)
-        self._statusbar.set_message(f"Aberto: {filename}  (visualizador chega na Fase 2)")
 
     # ------------------------------------------------------------------ Duplicar aba
 
@@ -147,29 +149,71 @@ class App(QMainWindow):
             self._close_tab(idx)
 
     def _on_tab_changed(self, index: int):
-        is_home = index == 0
+        w       = self._tabs.widget(index)
+        is_home = index == 0 or not isinstance(w, PDFTab)
         self._toolbar.set_pdf_enabled(not is_home)
+
         if is_home:
             self.setWindowTitle("PyReaderPDF")
             self._statusbar.set_message("Início")
         else:
-            path = self._tab_paths.get(index, "")
-            name = path.replace("\\", "/").split("/")[-1] if path else ""
-            self.setWindowTitle(f"PyReaderPDF — {name}")
+            tab = w
+            self.setWindowTitle(f"PyReaderPDF — {tab.filename}")
+            self._toolbar.update_page(tab.current_page, tab.total_pages)
+            self._statusbar.update(tab.current_page, tab.total_pages, tab.zoom)
 
     def _current_path(self) -> str | None:
         idx = self._tabs.currentIndex()
         return self._tab_paths.get(idx)
 
-    # ------------------------------------------------------------------ Ações (Fase 2 implementa de fato)
+    def _active_tab(self) -> PDFTab | None:
+        idx = self._tabs.currentIndex()
+        w   = self._tabs.widget(idx)
+        return w if isinstance(w, PDFTab) else None
 
-    def prev_page(self):         pass
-    def next_page(self):         pass
-    def go_to_page(self, p):     pass
-    def zoom_in(self):           pass
-    def zoom_out(self):          pass
-    def zoom_reset(self):        pass
-    def toggle_view_mode(self):  pass
+    def _on_page_changed(self, current: int, total: int):
+        if isinstance(self._tabs.currentWidget(), PDFTab):
+            self._toolbar.update_page(current, total)
+            tab = self._active_tab()
+            if tab:
+                self._statusbar.update(current, total, tab.zoom)
+
+    def _on_zoom_changed(self, zoom: float):
+        if isinstance(self._tabs.currentWidget(), PDFTab):
+            tab = self._active_tab()
+            if tab:
+                self._statusbar.update(tab.current_page, tab.total_pages, zoom)
+
+    # ------------------------------------------------------------------ Ações
+
+    def prev_page(self):
+        tab = self._active_tab()
+        if tab: tab.prev_page()
+
+    def next_page(self):
+        tab = self._active_tab()
+        if tab: tab.next_page()
+
+    def go_to_page(self, page: int):
+        tab = self._active_tab()
+        if tab and not tab.go_to(page):
+            self._statusbar.set_message(
+                f"Página inválida. Total: {tab.total_pages}")
+
+    def zoom_in(self):
+        tab = self._active_tab()
+        if tab: tab.zoom_in()
+
+    def zoom_out(self):
+        tab = self._active_tab()
+        if tab: tab.zoom_out()
+
+    def zoom_reset(self):
+        tab = self._active_tab()
+        if tab: tab.zoom_reset()
+
+    def toggle_view_mode(self):
+        self._statusbar.set_message("Modo contínuo chega na Fase 3")
 
     def add_active_to_library(self):
         path = self._current_path()
