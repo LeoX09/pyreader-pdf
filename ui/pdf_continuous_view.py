@@ -1,16 +1,18 @@
 import fitz
 from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene,
                                 QGraphicsPixmapItem, QGraphicsRectItem)
-from PySide6.QtCore import Qt, Signal, QThread, QObject, QTimer, QPointF
+from PySide6.QtCore import Qt, Signal, QThread, QObject, QTimer, QRectF
 from PySide6.QtGui import QPixmap, QImage, QColor, QPen, QBrush, QWheelEvent
+from ui.text_layer import TextLayer, TextLayerSignals, WordRect
 
 PAGE_GAP    = 16
 PRELOAD_PX  = 900
-RENDER_DPI  = 2.0   # fator de render fixo — alta qualidade independente do zoom
+RENDER_DPI  = 2.0
 
 
 class PageRenderer(QObject):
-    done = Signal(int, QPixmap)
+    """Renderiza página E extrai palavras na mesma thread."""
+    done = Signal(int, QPixmap, list)  # index, pixmap, words
 
     def __init__(self, doc, index: int):
         super().__init__()
@@ -24,22 +26,21 @@ class PageRenderer(QObject):
             pix  = page.get_pixmap(matrix=mat, alpha=False)
             img  = QImage(pix.samples, pix.width, pix.height,
                           pix.stride, QImage.Format.Format_RGB888)
-            self.done.emit(self._index, QPixmap.fromImage(img.copy()))
+            pixmap = QPixmap.fromImage(img.copy())
+
+            # Palavras em PDF points (scale=1.0) — scene está em PDF points
+            words = []
+            for w in page.get_text("words"):
+                x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+                words.append(WordRect(text, QRectF(x0, y0, x1-x0, y1-y0)))
+
+            self.done.emit(self._index, pixmap, words)
         except Exception:
             pass
 
 
 class PDFContinuousView(QGraphicsView):
-    """
-    Visualização contínua — arquitetura definitiva:
-
-    Scene coords = PDF points (zoom=1.0)
-    Pixmaps renderizados em RENDER_DPI=2.0 → item.setScale(0.5)
-      → item ocupa exatamente o tamanho certo na scene
-    Zoom visual = view.scale(factor) incremental com AnchorUnderMouse
-      → GPU puro, sem reprocessar pixmaps, sem perda de qualidade
-    _zoom rastreado via transform().m11()
-    """
+    """Visualização contínua com seleção de texto."""
 
     page_changed = Signal(int, int)
     zoom_changed = Signal(float)
@@ -52,23 +53,23 @@ class PDFContinuousView(QGraphicsView):
         self._page_widths  = []
         self._placeholders = {}
         self._pixmap_items = {}
+        self._text_layers  = {}
         self._loading      = set()
         self._threads      = {}
         self._current_page = 0
+        self.text_signals  = TextLayerSignals()
 
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
-
         self.setRenderHint(self.renderHints().SmoothPixmapTransform, True)
         self.setRenderHint(self.renderHints().Antialiasing, True)
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.setStyleSheet("border:none; background:#181818;")
         self.setBackgroundBrush(QColor("#181818"))
 
-        # Zoom inicial via scale() — não setTransform()
         self.scale(1.5, 1.5)
 
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
@@ -81,6 +82,7 @@ class PDFContinuousView(QGraphicsView):
         self._scene.clear()
         self._placeholders.clear()
         self._pixmap_items.clear()
+        self._text_layers.clear()   # ← crítico: limpa antes de scene.clear()
         self._loading.clear()
         self._threads.clear()
         self._page_tops.clear()
@@ -90,7 +92,7 @@ class PDFContinuousView(QGraphicsView):
         y = PAGE_GAP
         for i in range(len(self._doc)):
             page = self._doc[i]
-            w    = page.rect.width   # PDF points — zoom=1.0
+            w    = page.rect.width
             h    = page.rect.height
             self._page_tops.append(y)
             self._page_heights.append(h)
@@ -110,7 +112,6 @@ class PDFContinuousView(QGraphicsView):
             return
         max_w   = max(self._page_widths)
         total_h = self._page_tops[-1] + self._page_heights[-1] + PAGE_GAP
-        # Scene width = max(conteúdo, viewport em coords de scene)
         zoom    = self.transform().m11()
         vp_w    = self.viewport().width() / zoom if zoom > 0 else max_w
         scene_w = max(max_w, vp_w)
@@ -124,14 +125,13 @@ class PDFContinuousView(QGraphicsView):
             if i in self._placeholders:
                 self._placeholders[i].setPos(x, self._page_tops[i])
             if i in self._pixmap_items:
-                # item renderizado em RENDER_DPI=2x, setScale(0.5) → ocupa 1x na scene
-                # pos precisa compensar a origem do scale
                 self._pixmap_items[i].setPos(x, self._page_tops[i])
+            if i in self._text_layers:
+                self._text_layers[i].setPos(x, self._page_tops[i])
 
     # ------------------------------------------------------------------ Lazy load
 
     def _visible_range(self):
-        """Área visível em coords de scene (antes do transform)."""
         zoom  = self.transform().m11()
         vbar  = self.verticalScrollBar()
         vp_h  = self.viewport().height()
@@ -159,23 +159,21 @@ class PDFContinuousView(QGraphicsView):
         self._threads[index] = (thread, renderer)
         thread.start()
 
-    def _on_render_done(self, index: int, pixmap: QPixmap):
+    def _on_render_done(self, index: int, pixmap: QPixmap, words: list):
         self._loading.discard(index)
         if index in self._threads:
             thread, _ = self._threads.pop(index)
             thread.quit()
-
         if index >= len(self._page_widths):
             return
 
         scene_w  = self._scene.sceneRect().width()
         page_w   = self._page_widths[index]
         page_top = self._page_tops[index]
+        s        = 1.0 / RENDER_DPI
+        x        = (scene_w - page_w) / 2
 
-        # item.setScale(s) → pixmap 2x renderizado aparece em tamanho 1x
-        s = 1.0 / RENDER_DPI
-        x = (scene_w - page_w) / 2
-
+        # Pixmap item
         if index in self._pixmap_items:
             self._pixmap_items[index].setPixmap(pixmap)
             self._pixmap_items[index].setScale(s)
@@ -188,6 +186,14 @@ class PDFContinuousView(QGraphicsView):
             self._scene.addItem(item)
             self._pixmap_items[index] = item
 
+        # Text layer — apenas uma vez por página
+        if index not in self._text_layers:
+            tl = TextLayer(QRectF(0, 0, page_w, self._page_heights[index]),
+                           words, index, self.text_signals)
+            tl.setPos(x, page_top)
+            self._scene.addItem(tl)
+            self._text_layers[index] = tl
+
     # ------------------------------------------------------------------ Zoom
 
     @property
@@ -195,12 +201,11 @@ class PDFContinuousView(QGraphicsView):
         return self.transform().m11()
 
     def set_zoom(self, target: float):
-        target = max(0.25, min(target, 5.0))
+        target  = max(0.25, min(target, 5.0))
         current = self.transform().m11()
         if abs(target - current) < 0.01:
             return
         factor = target / current
-        # AnchorViewCenter para botões +/- ; wheelEvent usa AnchorUnderMouse antes de scale()
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.scale(factor, factor)
         self._update_scene_rect()
@@ -214,7 +219,7 @@ class PDFContinuousView(QGraphicsView):
 
     def go_to_page(self, index: int):
         if 0 <= index < len(self._doc):
-            zoom  = self.transform().m11()
+            zoom    = self.transform().m11()
             scene_y = self._page_tops[index]
             self.verticalScrollBar().setValue(int(scene_y * zoom))
             self._current_page = index
@@ -237,7 +242,6 @@ class PDFContinuousView(QGraphicsView):
             new_zoom = self.zoom * factor
             if not (0.25 <= new_zoom <= 5.0):
                 return
-            # AnchorUnderMouse justo antes de scale() — recomendação do Qt Forum
             self.setTransformationAnchor(
                 QGraphicsView.ViewportAnchor.AnchorUnderMouse)
             self.scale(factor, factor)
