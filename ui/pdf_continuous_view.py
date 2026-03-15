@@ -5,42 +5,49 @@ from PySide6.QtCore import Qt, Signal, QThread, QObject, QTimer, QRectF
 from PySide6.QtGui import QPixmap, QImage, QColor, QPen, QBrush, QWheelEvent
 from ui.text_layer import TextLayer, TextLayerSignals, WordRect
 
-PAGE_GAP    = 16
-PRELOAD_PX  = 900
-RENDER_DPI  = 2.0
+PAGE_GAP     = 16
+PRELOAD_PX   = 900
+MIN_QUALITY  = 2.0    # zoom mínimo de renderização — qualidade base
+HIRES_DELAY  = 220    # ms debounce após zoom
 
 
 class PageRenderer(QObject):
-    """Renderiza página E extrai palavras na mesma thread."""
-    done = Signal(int, QPixmap, list)  # index, pixmap, words
+    """Renderiza página no zoom atual — qualidade sempre nativa."""
+    done = Signal(int, QPixmap, float, list)  # index, pixmap, render_zoom, words
 
-    def __init__(self, doc, index: int):
+    def __init__(self, doc, index: int, render_zoom: float):
         super().__init__()
-        self._doc   = doc
-        self._index = index
+        self._doc         = doc
+        self._index       = index
+        self._render_zoom = render_zoom
 
     def run(self):
         try:
             page = self._doc[self._index]
-            mat  = fitz.Matrix(RENDER_DPI, RENDER_DPI)
+            mat  = fitz.Matrix(self._render_zoom, self._render_zoom)
             pix  = page.get_pixmap(matrix=mat, alpha=False)
             img  = QImage(pix.samples, pix.width, pix.height,
                           pix.stride, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(img.copy())
 
-            # Palavras em PDF points (scale=1.0) — scene está em PDF points
             words = []
             for w in page.get_text("words"):
                 x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
                 words.append(WordRect(text, QRectF(x0, y0, x1-x0, y1-y0)))
 
-            self.done.emit(self._index, pixmap, words)
+            self.done.emit(self._index, pixmap, self._render_zoom, words)
         except Exception:
             pass
 
 
 class PDFContinuousView(QGraphicsView):
-    """Visualização contínua com seleção de texto."""
+    """
+    Visualização contínua com qualidade de renderização adaptativa.
+    - Pixmaps sempre renderizados em max(MIN_QUALITY, zoom_atual)
+    - Zoom visual instantâneo via view.scale() (GPU)
+    - Debounce: re-renderiza páginas visíveis no novo zoom após parar
+    - Zero upscaling: qualidade sempre nativa ao nível de zoom
+    """
 
     page_changed = Signal(int, int)
     zoom_changed = Signal(float)
@@ -53,11 +60,16 @@ class PDFContinuousView(QGraphicsView):
         self._page_widths  = []
         self._placeholders = {}
         self._pixmap_items = {}
+        self._render_zooms = {}   # index -> zoom em que foi renderizado
         self._text_layers  = {}
         self._loading      = set()
         self._threads      = {}
         self._current_page = 0
         self.text_signals  = TextLayerSignals()
+
+        self._hires_timer = QTimer(self)
+        self._hires_timer.setSingleShot(True)
+        self._hires_timer.timeout.connect(self._hires_reload)
 
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -82,7 +94,8 @@ class PDFContinuousView(QGraphicsView):
         self._scene.clear()
         self._placeholders.clear()
         self._pixmap_items.clear()
-        self._text_layers.clear()   # ← crítico: limpa antes de scene.clear()
+        self._render_zooms.clear()
+        self._text_layers.clear()
         self._loading.clear()
         self._threads.clear()
         self._page_tops.clear()
@@ -139,6 +152,17 @@ class PDFContinuousView(QGraphicsView):
         bot_y = (vbar.value() + vp_h) / zoom + PRELOAD_PX
         return top_y, bot_y
 
+    def _render_zoom_needed(self) -> float:
+        """Zoom de renderização = max(qualidade mínima, zoom visual atual)."""
+        return max(MIN_QUALITY, self.transform().m11())
+
+    def _needs_rerender(self, index: int) -> bool:
+        """Página precisa re-render se nunca foi renderizada ou zoom desatualizado."""
+        if index not in self._render_zooms:
+            return True
+        # Re-renderiza se o zoom atual exige resolução maior que a existente
+        return self._render_zoom_needed() > self._render_zooms[index] + 0.05
+
     def _lazy_load(self):
         if not self._page_tops:
             return
@@ -146,20 +170,23 @@ class PDFContinuousView(QGraphicsView):
         for i in range(len(self._doc)):
             in_view = (self._page_tops[i] + self._page_heights[i] >= top_y and
                        self._page_tops[i] <= bot_y)
-            if in_view and i not in self._pixmap_items and i not in self._loading:
+            if in_view and self._needs_rerender(i) and i not in self._loading:
                 self._render_page(i)
 
     def _render_page(self, index: int):
         self._loading.add(index)
+        render_zoom = self._render_zoom_needed()
+
         thread   = QThread(self)
-        renderer = PageRenderer(self._doc, index)
+        renderer = PageRenderer(self._doc, index, render_zoom)
         renderer.moveToThread(thread)
         renderer.done.connect(self._on_render_done)
         thread.started.connect(renderer.run)
         self._threads[index] = (thread, renderer)
         thread.start()
 
-    def _on_render_done(self, index: int, pixmap: QPixmap, words: list):
+    def _on_render_done(self, index: int, pixmap: QPixmap,
+                         render_zoom: float, words: list):
         self._loading.discard(index)
         if index in self._threads:
             thread, _ = self._threads.pop(index)
@@ -167,13 +194,20 @@ class PDFContinuousView(QGraphicsView):
         if index >= len(self._page_widths):
             return
 
+        # Descarta se um render de qualidade superior já chegou
+        existing = self._render_zooms.get(index, 0)
+        if render_zoom < existing - 0.05:
+            return
+
         scene_w  = self._scene.sceneRect().width()
         page_w   = self._page_widths[index]
         page_top = self._page_tops[index]
-        s        = 1.0 / RENDER_DPI
-        x        = (scene_w - page_w) / 2
+        # scale = 1/render_zoom → pixmap renderizado em 3x fica no tamanho 1x da scene
+        s = 1.0 / render_zoom
+        x = (scene_w - page_w) / 2
 
-        # Pixmap item
+        self._render_zooms[index] = render_zoom
+
         if index in self._pixmap_items:
             self._pixmap_items[index].setPixmap(pixmap)
             self._pixmap_items[index].setScale(s)
@@ -210,6 +244,17 @@ class PDFContinuousView(QGraphicsView):
         self.scale(factor, factor)
         self._update_scene_rect()
         self.zoom_changed.emit(self.zoom)
+        # Debounce: re-renderiza páginas visíveis no zoom exato após parar
+        self._hires_timer.start(HIRES_DELAY)
+
+    def _hires_reload(self):
+        """Dispara após debounce — re-renderiza páginas visíveis no zoom atual."""
+        top_y, bot_y = self._visible_range()
+        for i in range(len(self._doc)):
+            in_view = (self._page_tops[i] + self._page_heights[i] >= top_y and
+                       self._page_tops[i] <= bot_y)
+            if in_view and self._needs_rerender(i) and i not in self._loading:
+                self._render_page(i)
 
     def zoom_in(self):    self.set_zoom(round(self.zoom + 0.25, 2))
     def zoom_out(self):   self.set_zoom(round(self.zoom - 0.25, 2))
@@ -247,7 +292,15 @@ class PDFContinuousView(QGraphicsView):
             self.scale(factor, factor)
             self._update_scene_rect()
             self.zoom_changed.emit(self.zoom)
+            self._hires_timer.start(HIRES_DELAY)
             return
+
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            delta = event.angleDelta().y()
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - delta)
+            return
+
         super().wheelEvent(event)
 
     def resizeEvent(self, event):

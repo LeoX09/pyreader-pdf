@@ -163,6 +163,13 @@ class PDFView(QGraphicsView):
             delta = event.angleDelta().y()
             self.set_zoom(self._zoom + (0.15 if delta > 0 else -0.15))
             return
+
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            delta = event.angleDelta().y()
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - delta)
+            return
+
         delta = event.angleDelta().y()
         vbar  = self.verticalScrollBar()
         if delta < 0 and vbar.value() == vbar.maximum():
