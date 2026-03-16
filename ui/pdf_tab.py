@@ -1,20 +1,20 @@
 import fitz
 import core.config as config
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget
-from PySide6.QtCore import Signal, Qt, QTimer
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+                                QStackedWidget, QPushButton, QSplitter)
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 
 from ui.pdf_view import PDFView
 from ui.pdf_continuous_view import PDFContinuousView
 from ui.notes_panel import NotesPanel
+from ui.thumbnails_panel import SidebarPanel
 
 MODE_SINGLE     = "single"
 MODE_CONTINUOUS = "continuous"
 
 
 class PDFTab(QWidget):
-    """Aba de PDF com visualizador + painel de notas lateral."""
-
     page_changed = Signal(int, int)
     zoom_changed = Signal(float)
 
@@ -27,26 +27,79 @@ class PDFTab(QWidget):
         self._single     = None
         self._continuous = None
         self._stack      = None
+        self._sidebar    = None
+        self._splitter   = None
         self._notes      = None
-        self._notes_visible = False
+        self._notes_visible   = False
+        self._sidebar_visible = True
         self._build(path)
 
     # ------------------------------------------------------------------ Build
 
     def _build(self, path: str):
-        outer = QHBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Layout externo: [btn_expand] [splitter]
+        outer = QHBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-
-        # Área do visualizador
-        viewer_w = QWidget()
-        viewer_layout = QVBoxLayout(viewer_w)
-        viewer_layout.setContentsMargins(0, 0, 0, 0)
-        viewer_layout.setSpacing(0)
-        outer.addWidget(viewer_w, stretch=1)
+        root.addLayout(outer)
 
         try:
             self._doc = fitz.open(path)
+
+            # ---- Botão expandir (oculto inicialmente) ----
+            self._btn_expand = QPushButton("›")
+            self._btn_expand.setFixedWidth(16)
+            self._btn_expand.setToolTip("Expandir painel lateral")
+            self._btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_expand.setStyleSheet("""
+                QPushButton {
+                    background: #1e1e1e; color: #444; border: none;
+                    border-right: 1px solid #2a2a2a; font-size: 11pt;
+                }
+                QPushButton:hover { color: white; background: #2a2a2a; }
+            """)
+            self._btn_expand.clicked.connect(self._expand_sidebar)
+            self._btn_expand.hide()
+            outer.addWidget(self._btn_expand)
+
+            # ---- Splitter principal ----
+            self._splitter = QSplitter(Qt.Orientation.Horizontal)
+            self._splitter.setHandleWidth(4)
+            self._splitter.setChildrenCollapsible(False)
+            self._splitter.setStyleSheet("""
+                QSplitter::handle {
+                    background: #222;
+                }
+                QSplitter::handle:hover {
+                    background: #2980b9;
+                }
+            """)
+            outer.addWidget(self._splitter)
+
+            # ---- Sidebar ----
+            self._sidebar = SidebarPanel(self._doc, self)
+            self._sidebar.page_requested.connect(lambda i: self.go_to(i + 1))
+            self._sidebar.topic_requested.connect(lambda i: self.go_to(i + 1))
+            self._sidebar.visibility_changed.connect(self._on_sidebar_visibility)
+            self._splitter.addWidget(self._sidebar)
+
+            # ---- Visualizador (centro) ----
+            viewer_w = QWidget()
+            viewer_layout = QVBoxLayout(viewer_w)
+            viewer_layout.setContentsMargins(0, 0, 0, 0)
+            viewer_layout.setSpacing(0)
+            self._splitter.addWidget(viewer_w)
+
+            # Proporcões iniciais: sidebar 170px, resto para o viewer
+            self._splitter.setSizes([220, 9999])
+            # Sidebar não colapsa abaixo de 100px, viewer abaixo de 300px
+            self._splitter.setStretchFactor(0, 0)
+            self._splitter.setStretchFactor(1, 1)
+            self._sidebar.setMinimumWidth(100)
 
             self._stack = QStackedWidget()
 
@@ -54,49 +107,66 @@ class PDFTab(QWidget):
             self._single.page_changed.connect(self.page_changed)
             self._single.zoom_changed.connect(self.zoom_changed)
             self._single.text_signals.text_selected.connect(self._on_text_selected)
+            self._single.page_changed.connect(
+                lambda c, t: self._sidebar.set_current_page(c - 1))
 
             self._continuous = PDFContinuousView(self._doc, self)
             self._continuous.page_changed.connect(self.page_changed)
             self._continuous.zoom_changed.connect(self.zoom_changed)
             self._continuous.text_signals.text_selected.connect(self._on_text_selected)
+            self._continuous.page_changed.connect(
+                lambda c, t: self._sidebar.set_current_page(c - 1))
 
-            self._stack.addWidget(self._single)      # 0
-            self._stack.addWidget(self._continuous)  # 1
-
-            if self._mode == MODE_CONTINUOUS:
-                self._stack.setCurrentIndex(1)
-            else:
-                self._stack.setCurrentIndex(0)
+            self._stack.addWidget(self._single)
+            self._stack.addWidget(self._continuous)
+            self._stack.setCurrentIndex(
+                1 if self._mode == MODE_CONTINUOUS else 0)
 
             viewer_layout.addWidget(self._stack)
 
-            # Notas panel
+            # ---- Notas (direita, fora do splitter) ----
             self._notes = NotesPanel(path, self)
             self._notes.go_to_page_requested.connect(self._go_to_page_from_note)
             self._notes.hide()
             outer.addWidget(self._notes)
 
-            # Atalho Ctrl+Shift+N — cria nota da seleção
-            sc = QShortcut(QKeySequence("Ctrl+Shift+N"), self)
-            sc.activated.connect(self._save_pending_selection)
-
-            # Atalho Ctrl+Shift+B — abre/fecha painel
-            sc2 = QShortcut(QKeySequence("Ctrl+Shift+B"), self)
-            sc2.activated.connect(self.toggle_notes)
+            QShortcut(QKeySequence("Ctrl+Shift+N"), self).activated.connect(
+                self._save_pending_selection)
+            QShortcut(QKeySequence("Ctrl+Shift+B"), self).activated.connect(
+                self.toggle_notes)
 
         except Exception as e:
             err = QLabel(f"Erro ao abrir:\n{e}")
             err.setAlignment(Qt.AlignmentFlag.AlignCenter)
             err.setStyleSheet("color:#e74c3c; font-size:11pt;")
-            viewer_layout.addWidget(err)
+            outer.addWidget(err)
 
-        self._pending_text  = ""
-        self._pending_page  = 0
+        self._pending_text = ""
+        self._pending_page = 0
+
+    # ------------------------------------------------------------------ Sidebar
+
+    def _on_sidebar_visibility(self, visible: bool):
+        self._sidebar_visible = visible
+        self._btn_expand.setVisible(not visible)
+        if not visible and self._splitter:
+            # Guarda tamanho atual antes de esconder
+            sizes = self._splitter.sizes()
+            self._last_sidebar_size = sizes[0] if sizes[0] > 0 else 170
+            self._splitter.setSizes([0, sum(sizes)])
+
+    def _expand_sidebar(self):
+        self._sidebar_visible = True
+        self._btn_expand.hide()
+        self._sidebar.show()
+        if self._splitter:
+            total = sum(self._splitter.sizes())
+            size  = getattr(self, "_last_sidebar_size", 170)
+            self._splitter.setSizes([size, total - size])
 
     # ------------------------------------------------------------------ Notas
 
     def _on_text_selected(self, text: str, page_index: int):
-        """Guarda a seleção pendente — Ctrl+Shift+N cria a nota."""
         self._pending_text = text
         self._pending_page = page_index
 
@@ -112,10 +182,7 @@ class PDFTab(QWidget):
         if not self._notes:
             return
         self._notes_visible = not self._notes_visible
-        if self._notes_visible:
-            self._notes.show()
-        else:
-            self._notes.hide()
+        self._notes.setVisible(self._notes_visible)
 
     def _go_to_page_from_note(self, page_index: int):
         self.go_to(page_index + 1)

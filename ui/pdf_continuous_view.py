@@ -66,6 +66,8 @@ class PDFContinuousView(QGraphicsView):
         self._threads      = {}
         self._current_page = 0
         self.text_signals  = TextLayerSignals()
+        self._drag_selecting   = False
+        self._drag_start_scene = None
 
         self._hires_timer = QTimer(self)
         self._hires_timer.setSingleShot(True)
@@ -279,6 +281,54 @@ class PDFContinuousView(QGraphicsView):
     def total_pages(self) -> int:  return len(self._doc)
 
     # ------------------------------------------------------------------ Eventos
+
+    # ------------------------------------------------------------------ Seleção contínua
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            from ui.text_layer import TextLayer as _TL
+            scene_pos = self.mapToScene(event.pos())
+            on_text = any(
+                isinstance(it, _TL) and
+                it.boundingRect().translated(it.pos()).contains(scene_pos)
+                for it in self._scene.items(scene_pos)
+            )
+            if on_text:
+                self._drag_selecting   = True
+                self._drag_start_scene = scene_pos
+                for tl in self._text_layers.values():
+                    tl.clear_selection()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_selecting and self._drag_start_scene is not None:
+            from PySide6.QtCore import QRectF
+            scene_pos  = self.mapToScene(event.pos())
+            drag_scene = QRectF(self._drag_start_scene, scene_pos).normalized()
+            for tl in self._text_layers.values():
+                tl_rect = tl.boundingRect().translated(tl.pos())
+                if drag_scene.intersects(tl_rect):
+                    tl.select_by_rect(
+                        drag_scene.translated(-tl.pos()))
+                else:
+                    tl.clear_selection()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_selecting:
+            self._drag_selecting   = False
+            self._drag_start_scene = None
+            texts = []
+            for i in sorted(self._text_layers):
+                txt = self._text_layers[i].get_selected_text()
+                if txt:
+                    texts.append(txt)
+            if texts:
+                self.text_signals.text_selected.emit(" ".join(texts), 0)
+            return
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

@@ -176,3 +176,20 @@ class TextLayer(QGraphicsItem):
     def clear_selection(self):
         self._selected.clear()
         self.update()
+
+    def select_by_rect(self, rect):
+        """Seleciona palavras que intersectam rect (coords locais do item)."""
+        self._selected = {
+            i for i, w in enumerate(self._words)
+            if rect.intersects(w.rect)
+        }
+        self.update()
+
+    def get_selected_text(self) -> str:
+        """Retorna texto das palavras selecionadas em ordem."""
+        if not self._selected:
+            return ""
+        ordered = sorted(self._selected,
+                         key=lambda i: (self._words[i].rect.y(),
+                                        self._words[i].rect.x()))
+        return " ".join(self._words[i].text for i in ordered)
