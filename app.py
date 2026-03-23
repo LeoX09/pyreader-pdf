@@ -1,96 +1,20 @@
-from PySide6.QtWidgets import (
-    QMainWindow, QTabWidget, QWidget, QFileDialog, QTabBar
-)
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QKeySequence, QShortcut, QPainter, QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QMainWindow, QTabWidget, QWidget, QFileDialog, QTabBar
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 
 from core.history import add_recent
+from core.progress import save_progress, get_progress
 from core.library import add_to_library
 from ui.toolbar import Toolbar
 from ui.home import HomeScreen
 from ui.statusbar import Statusbar
-from ui.pdf_tab import PDFTab, MODE_SINGLE, MODE_CONTINUOUS
+from ui.pdf_tab import PDFTab
 from ui.split_view import SplitView
 from ui.settings import SettingsDialog
+from ui.drop_overlay import DropOverlay
+from ui.tab_bar import DraggableTabBar
 import core.config as config
 
-
-# ------------------------------------------------------------------ Drop overlay
-
-class DropOverlay(QWidget):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._side = "none"
-
-    def set_side(self, side: str):
-        self._side = side
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        w, h = self.width(), self.height()
-        lc = QColor(26, 107, 60, 180 if self._side == "left"  else 70)
-        rc = QColor(26,  79, 107, 180 if self._side == "right" else 70)
-        p.fillRect(0, 0, w // 2, h, lc)
-        p.fillRect(w // 2, 0, w // 2, h, rc)
-        from PySide6.QtGui import QFont
-        from PySide6.QtCore import QRect
-        f = QFont(); f.setPointSize(13); f.setBold(True)
-        p.setFont(f)
-        p.setPen(QColor(255, 255, 255, 200))
-        p.drawText(QRect(0, 0, w // 2, h), Qt.AlignmentFlag.AlignCenter, "◧  Esquerda")
-        p.drawText(QRect(w // 2, 0, w // 2, h), Qt.AlignmentFlag.AlignCenter, "◨  Direita")
-        p.end()
-
-
-# ------------------------------------------------------------------ TabBar com drag
-
-class DraggableTabBar(QTabBar):
-    def __init__(self, app_ref, parent=None):
-        super().__init__(parent)
-        self._app      = app_ref
-        self._drag_idx = -1
-        self._start    = QPoint()
-        self._dragging = False
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_idx = self.tabAt(event.pos())
-            self._start    = event.pos()
-            self._dragging = False
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_idx > 0 and event.buttons() & Qt.MouseButton.LeftButton:
-            dy = event.pos().y() - self._start.y()
-            dl = (event.pos() - self._start).manhattanLength()
-            if not self._dragging and dl > 15 and dy > 10:
-                self._dragging = True
-            if self._dragging:
-                gp   = event.globalPosition().toPoint()
-                side = self._app.global_pos_to_side(gp)
-                self._app.show_drop_overlay(side)
-                return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if self._dragging and self._drag_idx > 0:
-            self._dragging = False
-            gp   = event.globalPosition().toPoint()
-            side = self._app.global_pos_to_side(gp)
-            self._app.hide_drop_overlay()
-            self._app.create_split_from_drag(self._drag_idx, side)
-            self._drag_idx = -1
-            return
-        self._dragging = False
-        self._drag_idx = -1
-        super().mouseReleaseEvent(event)
-
-
-# ------------------------------------------------------------------ App principal
 
 class App(QMainWindow):
 
@@ -101,11 +25,10 @@ class App(QMainWindow):
         self.setMinimumSize(800, 600)
         self.setStyleSheet("QMainWindow { background:#1e1e1e; }")
 
-        self._tab_paths    = {}   # tab index -> path
+        self._tab_paths    = {}
         self._split_widget = None
         self._split_tabs   = []
         self._drop_overlay = None
-
 
         self._build_ui()
         self._bind_shortcuts()
@@ -133,8 +56,7 @@ class App(QMainWindow):
         self._home = HomeScreen()
         self._home.open_requested.connect(self.open_path)
         self._tabs.addTab(self._home, "⌂  Início")
-        self._tabs.tabBar().setTabButton(
-            0, QTabBar.ButtonPosition.RightSide, None)
+        self._tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)
 
         self._toolbar.set_pdf_enabled(False)
 
@@ -187,6 +109,10 @@ class App(QMainWindow):
         tab.page_changed.connect(self._on_page_changed)
         tab.zoom_changed.connect(self._on_zoom_changed)
 
+        last_page = get_progress(path)
+        if last_page > 0:
+            tab.go_to(last_page)
+
         idx = self._tabs.addTab(tab, short)
         self._tab_paths[idx] = path
         self._tabs.setCurrentIndex(idx)
@@ -205,7 +131,6 @@ class App(QMainWindow):
     # ------------------------------------------------------------------ Split via atalho
 
     def _split_active_tab(self, side: str):
-        """Ctrl+→ ou Ctrl+← — cria split com a aba atual e a adjacente."""
         if self._split_widget:
             self.close_split()
             return
@@ -214,7 +139,6 @@ class App(QMainWindow):
         if not isinstance(self._tabs.widget(active_idx), PDFTab):
             return
 
-        # Busca outra aba PDF para colocar no outro lado
         other_idx = None
         for i in range(self._tabs.count()):
             if i != active_idx and isinstance(self._tabs.widget(i), PDFTab):
@@ -222,7 +146,6 @@ class App(QMainWindow):
                 break
 
         if other_idx is None:
-            # Não há outra aba — duplica automaticamente
             active_tab = self._tabs.widget(active_idx)
             path       = active_tab.path
             filename   = active_tab.filename
@@ -244,7 +167,7 @@ class App(QMainWindow):
 
     # ------------------------------------------------------------------ Split via drag
 
-    def global_pos_to_side(self, global_pos: QPoint) -> str:
+    def global_pos_to_side(self, global_pos) -> str:
         w = self._tabs.currentWidget()
         if not w:
             return "right"
@@ -275,7 +198,6 @@ class App(QMainWindow):
         if not isinstance(dragged_w, PDFTab) or not isinstance(active_w, PDFTab):
             return
         if dragged_idx == active_idx:
-            # Mesmo tab — abre o mesmo arquivo nos dois lados
             self._enter_split(
                 dragged_w.path, dragged_w.path,
                 dragged_w.filename, dragged_w.filename + " (2)")
@@ -297,7 +219,6 @@ class App(QMainWindow):
 
         left_tab  = PDFTab(left_path,  self)
         right_tab = PDFTab(right_path, self)
-
         self._split_tabs = [left_tab, right_tab]
 
         split = SplitView(left_tab, right_tab, left_name, right_name, self)
@@ -342,6 +263,8 @@ class App(QMainWindow):
         if index == 0:
             return
         w = self._tabs.widget(index)
+        if isinstance(w, PDFTab):
+            save_progress(w.path, w.current_page)
         self._tabs.removeTab(index)
         self._rebuild_tab_paths()
         if w:
@@ -417,7 +340,6 @@ class App(QMainWindow):
         dlg.exec()
 
     def _apply_settings(self):
-        """Aplica novas configurações em todas as abas abertas."""
         mode = config.get("view_mode")
         for i in range(self._tabs.count()):
             w = self._tabs.widget(i)
