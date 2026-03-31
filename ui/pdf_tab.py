@@ -82,7 +82,6 @@ class PDFTab(QWidget):
 
             # ---- Sidebar ----
             self._sidebar = SidebarPanel(self._doc, self)
-            self._sidebar.page_requested.connect(lambda i: self.go_to(i + 1))
             self._sidebar.topic_requested.connect(lambda i: self.go_to(i + 1))
             self._sidebar.visibility_changed.connect(self._on_sidebar_visibility)
             self._splitter.addWidget(self._sidebar)
@@ -107,15 +106,11 @@ class PDFTab(QWidget):
             self._single.page_changed.connect(self.page_changed)
             self._single.zoom_changed.connect(self.zoom_changed)
             self._single.text_signals.text_selected.connect(self._on_text_selected)
-            self._single.page_changed.connect(
-                lambda c, t: self._sidebar.set_current_page(c - 1))
 
             self._continuous = PDFContinuousView(self._doc, self)
             self._continuous.page_changed.connect(self.page_changed)
             self._continuous.zoom_changed.connect(self.zoom_changed)
             self._continuous.text_signals.text_selected.connect(self._on_text_selected)
-            self._continuous.page_changed.connect(
-                lambda c, t: self._sidebar.set_current_page(c - 1))
 
             self._stack.addWidget(self._single)
             self._stack.addWidget(self._continuous)
