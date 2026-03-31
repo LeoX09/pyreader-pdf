@@ -37,7 +37,10 @@ def update_thumb(path: str, thumb_path: str):
             break
     _save(library)
 
-
+def reorder_library(new_library: list):
+    """Salva a nova ordem dos livros"""
+    _save(new_library)
+    
 def is_in_library(path: str) -> bool:
     return any(b["path"] == path for b in load_library())
 

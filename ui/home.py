@@ -2,20 +2,141 @@ import os
 import threading
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QGridLayout, QFileDialog, QGraphicsDropShadowEffect
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QFrame, QGridLayout, QFileDialog
 )
-from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QSize
-from PySide6.QtGui import QPixmap, QImage, QColor, QPainter, QBrush, QLinearGradient
+from PySide6.QtCore import Qt, Signal, QMimeData
+from PySide6.QtGui import QPixmap, QImage, QDrag, QPainter, QColor
 
-from core.library import load_library, add_to_library, remove_from_library
+from qfluentwidgets import (
+    SearchLineEdit, SmoothScrollArea, CardWidget,
+    TransparentToolButton, PrimaryPushButton,
+    SubtitleLabel, BodyLabel, CaptionLabel,
+    FluentIcon as FI, TransparentPushButton
+)
+
+from core.library import load_library, add_to_library, remove_from_library, reorder_library
 from core.history import load_recent, remove_recent
 from core.thumbnail import get_thumbnail
 
-CARD_W = 160
-CARD_H = 260
+CARD_W  = 160
+CARD_H  = 260
 THUMB_W = 140
 THUMB_H = 200
+COLS    = 5
+
+
+class DraggableCard(CardWidget):
+    open_requested   = Signal(str)
+    remove_requested = Signal(str)
+    drag_started     = Signal(object)
+    dropped_on       = Signal(object)
+
+    def __init__(self, item: dict, mode: str, parent=None):
+        super().__init__(parent)
+        self.path    = item["path"]
+        self._mode   = mode
+        self._drag_start_pos = None
+        self._dragging       = False
+
+        exists = os.path.exists(self.path)
+        name   = item["name"].replace(".pdf","").replace(".PDF","")
+        short  = name if len(name) <= 18 else name[:15] + "…"
+
+        self.setFixedSize(CARD_W, CARD_H)
+        if exists and mode == "library":
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.setAcceptDrops(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        thumb_f = QFrame()
+        thumb_f.setFixedSize(THUMB_W, THUMB_H)
+        thumb_f.setStyleSheet("QFrame{background:#2d2d2d;border-radius:4px;border:none;}")
+        tl = QVBoxLayout(thumb_f)
+        tl.setContentsMargins(0, 0, 0, 0)
+        self._thumb_lbl = QLabel()
+        self._thumb_lbl.setFixedSize(THUMB_W, THUMB_H)
+        self._thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_lbl.setStyleSheet("background:transparent;border:none;")
+        if not exists:
+            self._thumb_lbl.setText("✕")
+            self._thumb_lbl.setStyleSheet("color:#c0392b;font-size:24pt;background:transparent;")
+        else:
+            self._thumb_lbl.setText("PDF")
+            self._thumb_lbl.setStyleSheet("color:#555;font-size:14pt;font-weight:bold;background:transparent;")
+        tl.addWidget(self._thumb_lbl)
+        layout.addWidget(thumb_f, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        name_lbl = CaptionLabel(short)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setWordWrap(True)
+        layout.addWidget(name_lbl)
+
+        btn_x = TransparentToolButton(FI.CLOSE, self)
+        btn_x.setFixedSize(22, 22)
+        btn_x.move(CARD_W - 28, 4)
+        btn_x.clicked.connect(lambda: self.remove_requested.emit(self.path))
+
+    def set_pixmap(self, pixmap: QPixmap):
+        try:
+            self._thumb_lbl.setPixmap(pixmap)
+            self._thumb_lbl.setText("")
+            self._thumb_lbl.setStyleSheet("background:transparent;")
+        except RuntimeError:
+            pass
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not self._dragging:
+            if self._drag_start_pos and \
+               (event.pos() - self._drag_start_pos).manhattanLength() < 5:
+                self.open_requested.emit(self.path)
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._drag_start_pos is None or self._mode != "library":
+            return
+        if (event.pos() - self._drag_start_pos).manhattanLength() < 10:
+            return
+        self._dragging = True
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(self.path)
+        drag.setMimeData(mime)
+        ghost = self.grab()
+        p = QPainter(ghost)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        p.fillRect(ghost.rect(), QColor(0, 0, 0, 160))
+        p.end()
+        drag.setPixmap(ghost)
+        drag.setHotSpot(event.pos())
+        self.drag_started.emit(self)
+        drag.exec(Qt.DropAction.MoveAction)
+        self._dragging = False
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText() and self._mode == "library":
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        pass
+
+    def dropEvent(self, event):
+        if event.mimeData().hasText() and self._mode == "library":
+            self.dropped_on.emit(self)
+            event.acceptProposedAction()
 
 
 class HomeScreen(QWidget):
@@ -24,118 +145,91 @@ class HomeScreen(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._card_map = {}
-        self._mode = "library"
+        self._card_map    = {}
+        self._items_order = []
+        self._drag_source = None
+        self._mode        = "library"
+        self._search_text = ""
+        self._all_items   = []
         self._thumb_ready.connect(self._apply_thumb)
-        self.setStyleSheet("background:#141414;")
+        self.setObjectName("homeScreen")
+        self.setStyleSheet("#homeScreen{background:#1f1f1f;}")
         self._build()
-
-    # ------------------------------------------------------------------ Layout
 
     def _build(self):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
         root.addWidget(self._build_sidebar())
-
-        div = QFrame()
-        div.setFixedWidth(1)
-        div.setStyleSheet("background:#222;")
+        div = QFrame(); div.setFixedWidth(1)
+        div.setStyleSheet("background:#333;")
         root.addWidget(div)
-
         self._main_area   = QWidget()
         self._main_layout = QVBoxLayout(self._main_area)
         self._main_layout.setContentsMargins(0, 0, 0, 0)
         self._main_layout.setSpacing(0)
-        self._main_area.setStyleSheet("background:#141414;")
         root.addWidget(self._main_area, stretch=1)
-
         self._show_library()
 
     def _build_sidebar(self):
         sidebar = QWidget()
-        sidebar.setFixedWidth(210)
-        sidebar.setStyleSheet("background:#111;")
+        sidebar.setFixedWidth(220)
+        sidebar.setStyleSheet("background:#141414;")
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Logo
         logo_w = QWidget()
-        logo_w.setFixedHeight(70)
-        logo_w.setStyleSheet("background:#111;")
+        logo_w.setFixedHeight(72)
+        logo_w.setStyleSheet("background:#141414;")
         ll = QHBoxLayout(logo_w)
-        ll.setContentsMargins(20, 0, 20, 0)
+        ll.setContentsMargins(18, 0, 18, 0)
         icon = QLabel("📖")
-        icon.setStyleSheet("font-size:20pt; background:transparent;")
-        name = QLabel("PyReaderPDF")
-        name.setStyleSheet("color:white; font-size:11pt; font-weight:bold; background:transparent;")
+        icon.setStyleSheet("font-size:22pt;background:transparent;")
+        name = SubtitleLabel("PyReaderPDF")
         ll.addWidget(icon)
+        ll.addSpacing(8)
         ll.addWidget(name)
         ll.addStretch()
         layout.addWidget(logo_w)
 
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background:#222;")
+        sep = QFrame(); sep.setFixedHeight(1)
+        sep.setStyleSheet("background:#2a2a2a;")
         layout.addWidget(sep)
-
         layout.addSpacing(12)
 
-        self._btn_library = self._nav_btn("⊟", "Biblioteca",  self._show_library)
-        self._btn_recent  = self._nav_btn("⊙", "Recentes",    self._show_recent)
+        self._btn_library = self._nav_btn(FI.LIBRARY, "Biblioteca", self._show_library)
+        self._btn_recent  = self._nav_btn(FI.HISTORY, "Recentes",   self._show_recent)
         layout.addWidget(self._btn_library)
         layout.addWidget(self._btn_recent)
 
-        layout.addSpacing(8)
+        layout.addSpacing(12)
         sep2 = QFrame()
-        sep2.setStyleSheet("background:#222; margin:0 16px;")
+        sep2.setStyleSheet("background:#2a2a2a;margin:0 16px;")
         sep2.setFixedHeight(1)
         layout.addWidget(sep2)
-        layout.addSpacing(8)
+        layout.addSpacing(12)
 
-        btn_add = QPushButton("  ＋  Adicionar PDF")
-        btn_add.setFixedHeight(38)
-        btn_add.setCursor(Qt.PointingHandCursor)
-        btn_add.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #1a6b3c, stop:1 #145c32);
-                color: white; border: none; border-radius: 6px;
-                font-size: 9pt; font-weight: bold;
-                margin: 0 12px;
-            }
-            QPushButton:hover { background: #1f8048; }
-            QPushButton:pressed { background: #145c32; }
-        """)
+        btn_add = PrimaryPushButton(FI.ADD, "Adicionar PDF")
+        btn_add.setFixedHeight(36)
         btn_add.clicked.connect(self.add_to_library)
-        layout.addWidget(btn_add)
-
+        add_w = QWidget(); add_w.setStyleSheet("background:transparent;")
+        al = QHBoxLayout(add_w)
+        al.setContentsMargins(16, 0, 16, 0)
+        al.addWidget(btn_add)
+        layout.addWidget(add_w)
         layout.addStretch()
 
-        # Versão
-        ver = QLabel("v0.5 — PySide6")
-        ver.setAlignment(Qt.AlignCenter)
-        ver.setStyleSheet("color:#333; font-size:7pt; background:transparent; padding:12px;")
+        ver = CaptionLabel("v0.6 — Fluent Design")
+        ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(ver)
-
+        layout.addSpacing(12)
         return sidebar
 
-    def _nav_btn(self, icon: str, text: str, slot) -> QPushButton:
-        btn = QPushButton(f"  {icon}  {text}")
-        btn.setFixedHeight(40)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setFlat(True)
-        btn.setStyleSheet("""
-            QPushButton {
-                color: #888; text-align: left;
-                font-size: 10pt; background: transparent;
-                border: none; border-radius: 0;
-                padding-left: 8px;
-            }
-            QPushButton:hover { color: #ccc; background: #1a1a1a; }
-        """)
+    def _nav_btn(self, icon, text: str, slot):
+        btn = TransparentPushButton(icon, text)
+        btn.setFixedHeight(42)
+        btn.setFixedWidth(220)
         btn.clicked.connect(slot)
         return btn
 
@@ -147,196 +241,118 @@ class HomeScreen(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._card_map.clear()
+        self._items_order.clear()
 
     def _show_library(self):
         self._mode = "library"
-        self._set_active(self._btn_library)
         self._clear_main()
         self._render_section("Biblioteca", load_library(), "library")
 
     def _show_recent(self):
         self._mode = "recent"
-        self._set_active(self._btn_recent)
         self._clear_main()
         self._render_section("Recentes", load_recent(), "recent")
 
-    def _set_active(self, active):
-        for btn in (self._btn_library, self._btn_recent):
-            is_active = btn is active
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    color: {"white" if is_active else "#888"};
-                    text-align: left; font-size: 10pt;
-                    background: {"#1e1e1e" if is_active else "transparent"};
-                    border: none;
-                    border-left: {"3px solid #2980b9" if is_active else "3px solid transparent"};
-                    padding-left: 8px;
-                }}
-                QPushButton:hover {{ color: #ccc; background: #1a1a1a; }}
-            """)
-
     def _render_section(self, title: str, items: list, mode: str):
-        # Header
         header = QWidget()
         header.setFixedHeight(64)
-        header.setStyleSheet("background:#141414; border-bottom:1px solid #1e1e1e;")
+        header.setStyleSheet("background:#1f1f1f;border-bottom:1px solid #2a2a2a;")
         hl = QHBoxLayout(header)
-        hl.setContentsMargins(28, 0, 28, 0)
+        hl.setContentsMargins(28, 0, 24, 0)
+        hl.setSpacing(12)
 
-        t = QLabel(title)
-        t.setStyleSheet("color:white; font-size:15pt; font-weight:bold; background:transparent;")
+        t = SubtitleLabel(title)
         hl.addWidget(t)
-
-        c = QLabel(f"{len(items)} item{'s' if len(items) != 1 else ''}")
-        c.setStyleSheet("color:#444; font-size:9pt; background:transparent; padding-left:8px;")
-        hl.addWidget(c)
+        self._count_lbl = CaptionLabel(f"{len(items)} item{'s' if len(items)!=1 else ''}")
+        hl.addWidget(self._count_lbl)
         hl.addStretch()
+
+        self._search_box = SearchLineEdit()
+        self._search_box.setPlaceholderText("Buscar por nome ou palavra-chave…")
+        self._search_box.setFixedSize(300, 34)
+        self._search_box.textChanged.connect(self._on_search)
+        hl.addWidget(self._search_box)
         self._main_layout.addWidget(header)
 
         if not items:
             self._main_layout.addWidget(self._empty_state())
             return
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea{border:none; background:#141414;} QScrollBar:vertical{background:#1a1a1a; width:6px; border-radius:3px;} QScrollBar::handle:vertical{background:#333; border-radius:3px;} QScrollBar::handle:vertical:hover{background:#444;} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}")
+        self._scroll = SmoothScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet("QScrollArea{border:none;background:#1f1f1f;}")
 
-        container = QWidget()
-        container.setStyleSheet("background:#141414;")
-        grid = QGridLayout(container)
-        grid.setContentsMargins(24, 20, 24, 24)
-        grid.setSpacing(16)
+        self._container = QWidget()
+        self._container.setStyleSheet("background:#1f1f1f;")
+        self._grid = QGridLayout(self._container)
+        self._grid.setContentsMargins(24, 20, 24, 24)
+        self._grid.setSpacing(16)
 
-        cols = 5
-        for i, item in enumerate(items):
-            card = self._make_card(item, mode)
-            grid.addWidget(card, i // cols, i % cols, Qt.AlignTop)
-            self._card_map[item["path"]] = card
+        self._all_items   = items
+        self._items_order = [it["path"] for it in items]
+        self._populate_grid(items, mode)
 
-        grid.setRowStretch(grid.rowCount(), 1)
-        scroll.setWidget(container)
-        self._main_layout.addWidget(scroll, stretch=1)
-
+        self._scroll.setWidget(self._container)
+        self._main_layout.addWidget(self._scroll, stretch=1)
         self._load_thumbs(items)
 
-    def _empty_state(self):
-        w = QWidget()
-        w.setStyleSheet("background:#141414;")
-        l = QVBoxLayout(w)
-        l.setAlignment(Qt.AlignCenter)
+    def _populate_grid(self, items: list, mode: str = None):
+        if mode is None:
+            mode = self._mode
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            if item.widget():
+                item.widget().hide()
+                item.widget().deleteLater()
+        self._card_map.clear()
 
-        icon = QLabel("📚")
-        icon.setStyleSheet("font-size:52pt; background:transparent;")
-        icon.setAlignment(Qt.AlignCenter)
+        for i, item in enumerate(items):
+            card = DraggableCard(item, mode)
+            card.open_requested.connect(self.open_requested)
+            card.drag_started.connect(self._on_drag_started)
+            card.dropped_on.connect(self._on_dropped_on)
+            if mode == "library":
+                card.remove_requested.connect(self._remove_library)
+            else:
+                card.remove_requested.connect(self._remove_recent)
+            self._grid.addWidget(card, i // COLS, i % COLS, Qt.AlignmentFlag.AlignTop)
+            self._card_map[item["path"]] = card
+        self._grid.setRowStretch(self._grid.rowCount(), 1)
 
-        msg = QLabel("Nenhum item ainda")
-        msg.setStyleSheet("color:#555; font-size:12pt; font-weight:bold; background:transparent;")
-        msg.setAlignment(Qt.AlignCenter)
+    def _on_search(self, text: str):
+        self._search_text = text.lower().strip()
+        filtered = self._all_items if not self._search_text else [
+            it for it in self._all_items
+            if self._search_text in it["name"].lower()
+            or self._search_text in it["path"].lower()
+        ]
+        self._populate_grid(filtered)
+        self._count_lbl.setText(f"{len(filtered)} item{'s' if len(filtered)!=1 else ''}")
+        self._load_thumbs(filtered)
 
-        sub = QLabel("Use '+ Adicionar PDF' para começar")
-        sub.setStyleSheet("color:#333; font-size:9pt; background:transparent;")
-        sub.setAlignment(Qt.AlignCenter)
+    def _on_drag_started(self, card):
+        self._drag_source = card
 
-        l.addWidget(icon)
-        l.addSpacing(8)
-        l.addWidget(msg)
-        l.addWidget(sub)
-        return w
+    def _on_dropped_on(self, target):
+        if not self._drag_source or self._drag_source is target:
+            self._drag_source = None
+            return
+        src_path = self._drag_source.path
+        tgt_path = target.path
+        if src_path not in self._items_order or tgt_path not in self._items_order:
+            self._drag_source = None
+            return
+        src_i = self._items_order.index(src_path)
+        tgt_i = self._items_order.index(tgt_path)
+        self._items_order.insert(tgt_i, self._items_order.pop(src_i))
+        reorder_library(self._items_order)
+        order_map = {p: i for i, p in enumerate(self._items_order)}
+        self._all_items = sorted(self._all_items, key=lambda it: order_map.get(it["path"], 9999))
+        self._populate_grid(self._all_items)
+        self._load_thumbs(self._all_items)
+        self._drag_source = None
 
-    # ------------------------------------------------------------------ Card
-
-    def _make_card(self, item: dict, mode: str) -> QFrame:
-        path   = item["path"]
-        name   = item["name"].replace(".pdf","").replace(".PDF","")
-        exists = os.path.exists(path)
-        short  = name if len(name) <= 18 else name[:15] + "…"
-
-        card = QFrame()
-        card.setFixedSize(CARD_W, CARD_H)
-        card.setStyleSheet("""
-            QFrame {
-                background: #1c1c1c;
-                border-radius: 8px;
-                border: 1px solid #252525;
-            }
-        """)
-
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        # Thumb container
-        thumb_container = QFrame()
-        thumb_container.setFixedSize(THUMB_W, THUMB_H)
-        thumb_container.setStyleSheet("""
-            QFrame {
-                background: #252525;
-                border-radius: 4px;
-                border: none;
-            }
-        """)
-        tl = QVBoxLayout(thumb_container)
-        tl.setContentsMargins(0, 0, 0, 0)
-
-        thumb_lbl = QLabel()
-        thumb_lbl.setFixedSize(THUMB_W, THUMB_H)
-        thumb_lbl.setAlignment(Qt.AlignCenter)
-        thumb_lbl.setObjectName(f"thumb_{path}")
-        if not exists:
-            thumb_lbl.setText("✕")
-            thumb_lbl.setStyleSheet("color:#c0392b; font-size:24pt; background:transparent;")
-        else:
-            thumb_lbl.setText("PDF")
-            thumb_lbl.setStyleSheet("color:#444; font-size:14pt; font-weight:bold; background:transparent;")
-        tl.addWidget(thumb_lbl)
-        layout.addWidget(thumb_container, alignment=Qt.AlignHCenter)
-
-        # Nome
-        name_lbl = QLabel(short)
-        name_lbl.setAlignment(Qt.AlignCenter)
-        name_lbl.setStyleSheet(f"""
-            color: {"#d0d0d0" if exists else "#555"};
-            font-size: 8pt;
-            font-weight: {"600" if exists else "400"};
-            background: transparent;
-        """)
-        name_lbl.setWordWrap(True)
-        layout.addWidget(name_lbl)
-
-        # Botão remover
-        btn_x = QPushButton("×", card)
-        btn_x.setFixedSize(22, 22)
-        btn_x.move(CARD_W - 28, 4)
-        btn_x.setStyleSheet("""
-            QPushButton { background:rgba(0,0,0,0); color:#333; border:none; font-size:14pt; border-radius:4px; }
-            QPushButton:hover { color:#ff6b6b; background:rgba(255,107,107,0.1); }
-        """)
-        if mode == "library":
-            btn_x.clicked.connect(lambda _, p=path: self._remove_library(p))
-        else:
-            btn_x.clicked.connect(lambda _, p=path: self._remove_recent(p))
-
-        # Hover e clique
-        if exists:
-            card.setCursor(Qt.PointingHandCursor)
-            card.mousePressEvent = lambda e, p=path: self.open_requested.emit(p)
-
-            def enter(e, c=card):
-                c.setStyleSheet("""
-                    QFrame { background:#222; border-radius:8px; border:1px solid #2980b9; }
-                """)
-            def leave(e, c=card):
-                c.setStyleSheet("""
-                    QFrame { background:#1c1c1c; border-radius:8px; border:1px solid #252525; }
-                """)
-            card.enterEvent = enter
-            card.leaveEvent = leave
-
-        return card
-
-    def _load_thumbs(self, items):
-        snapshot = dict(self._card_map)
-
+    def _load_thumbs(self, items: list):
         def worker():
             for item in items:
                 path  = item["path"]
@@ -345,30 +361,36 @@ class HomeScreen(QWidget):
                     continue
                 try:
                     img    = QImage(thumb).scaled(THUMB_W, THUMB_H,
-                                                  Qt.KeepAspectRatio,
-                                                  Qt.SmoothTransformation)
+                                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                                  Qt.TransformationMode.SmoothTransformation)
                     pixmap = QPixmap.fromImage(img)
                     self._thumb_ready.emit(path, pixmap)
                 except Exception:
                     pass
-
         threading.Thread(target=worker, daemon=True).start()
 
     def _apply_thumb(self, path: str, pixmap: QPixmap):
         card = self._card_map.get(path)
-        if not card:
-            return
-        try:
-            card.objectName()
-            lbl = card.findChild(QLabel, f"thumb_{path}")
-            if lbl:
-                lbl.setPixmap(pixmap)
-                lbl.setText("")
-                lbl.setStyleSheet("background:transparent;")
-        except RuntimeError:
-            pass
+        if card:
+            try:
+                card.set_pixmap(pixmap)
+            except RuntimeError:
+                pass
 
-    # ------------------------------------------------------------------ Ações
+    def _empty_state(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon = QLabel("📚")
+        icon.setStyleSheet("font-size:52pt;background:transparent;")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg = SubtitleLabel("Nenhum item ainda")
+        msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub = BodyLabel("Use '+ Adicionar PDF' para começar")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        l.addWidget(icon); l.addSpacing(8)
+        l.addWidget(msg); l.addWidget(sub)
+        return w
 
     def add_to_library(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -378,11 +400,11 @@ class HomeScreen(QWidget):
         if paths:
             self._show_library()
 
-    def _remove_library(self, path):
+    def _remove_library(self, path: str):
         remove_from_library(path)
         self._show_library()
 
-    def _remove_recent(self, path):
+    def _remove_recent(self, path: str):
         remove_recent(path)
         self._show_recent()
 
