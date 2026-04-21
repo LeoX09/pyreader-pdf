@@ -24,12 +24,11 @@ class PageRenderer(QObject):
                           pix.stride, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(img.copy())
 
-            # Extrai palavras no zoom atual (coordenadas = pixels do pixmap)
             from PySide6.QtCore import QRectF as _QR
             words = []
             for w in page.get_text("words"):
-                x0, y0, x1, y1, text = w[0]*self._zoom, w[1]*self._zoom, \
-                                        w[2]*self._zoom, w[3]*self._zoom, w[4]
+                x0, y0, x1, y1, text = (w[0]*self._zoom, w[1]*self._zoom,
+                                         w[2]*self._zoom, w[3]*self._zoom, w[4])
                 words.append(WordRect(text, _QR(x0, y0, x1-x0, y1-y0)))
 
             self.done.emit(self._index, pixmap, self._zoom, words)
@@ -38,16 +37,17 @@ class PageRenderer(QObject):
 
 
 class PDFView(QGraphicsView):
-    """Visualizador página única com seleção de texto."""
+    """Visualizador página única com seleção de texto e marca texto."""
 
     page_changed = Signal(int, int)
     zoom_changed = Signal(float)
 
     HIRES_DELAY = 250
 
-    def __init__(self, doc, parent=None):
+    def __init__(self, doc, pdf_path: str = "", parent=None):
         super().__init__(parent)
         self._doc           = doc
+        self._pdf_path      = pdf_path
         self._page_index    = 0
         self._zoom          = 1.5
         self._base_zoom     = 1.5
@@ -108,14 +108,47 @@ class PDFView(QGraphicsView):
         self._scene.setSceneRect(QRectF(self._pixmap_item.boundingRect()))
         self.centerOn(self._pixmap_item)
 
-        # Text layer em coordenadas do pixmap (zoom já aplicado)
         page_rect = QRectF(0, 0, pixmap.width(), pixmap.height())
         self._text_layer = TextLayer(page_rect, words,
                                      self._page_index, self.text_signals)
+        self._text_layer.set_highlights(self._load_highlights_for_layer(index, zoom_at_render))
         self._scene.addItem(self._text_layer)
 
         self.page_changed.emit(self._page_index + 1, len(self._doc))
         self.zoom_changed.emit(self._zoom)
+
+    # ------------------------------------------------------------------ Highlights
+
+    def _load_highlights_for_layer(self, page_index: int, zoom: float) -> list:
+        if not self._pdf_path:
+            return []
+        from core.highlights import get_page_highlights
+        result = []
+        for h in get_page_highlights(self._pdf_path, page_index):
+            scaled = [[r[0]*zoom, r[1]*zoom, r[2]*zoom, r[3]*zoom]
+                      for r in h["rects"]]
+            result.append({"rects": scaled, "color": h["color"]})
+        return result
+
+    def refresh_highlights(self, page_index: int):
+        if page_index == self._page_index and self._text_layer:
+            self._text_layer.set_highlights(
+                self._load_highlights_for_layer(page_index, self._zoom))
+
+    def get_selection_info(self) -> dict:
+        """Retorna {page_index: [[x,y,w,h], ...]} em coords de documento."""
+        if not self._text_layer:
+            return {}
+        local_rects = self._text_layer.get_selected_rects()
+        if not local_rects:
+            return {}
+        z = self._zoom
+        doc_rects = [[x/z, y/z, w/z, h/z] for x, y, w, h in local_rects]
+        return {self._page_index: doc_rects}
+
+    def clear_selection(self):
+        if self._text_layer:
+            self._text_layer.clear_selection()
 
     # ------------------------------------------------------------------ Zoom
 
