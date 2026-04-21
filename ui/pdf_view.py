@@ -127,7 +127,7 @@ class PDFView(QGraphicsView):
         for h in get_page_highlights(self._pdf_path, page_index):
             scaled = [[r[0]*zoom, r[1]*zoom, r[2]*zoom, r[3]*zoom]
                       for r in h["rects"]]
-            result.append({"rects": scaled, "color": h["color"]})
+            result.append({"id": h["id"], "rects": scaled, "color": h["color"]})
         return result
 
     def refresh_highlights(self, page_index: int):

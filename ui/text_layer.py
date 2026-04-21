@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QPainter
 class TextLayerSignals(QObject):
     text_selected     = Signal(str, int)   # text, page_index
     selection_cleared = Signal()
+    highlight_clicked = Signal(int, int)   # highlight_id, page_index
 
 
 class WordRect:
@@ -73,9 +74,17 @@ class TextLayer(QGraphicsItem):
     # ------------------------------------------------------------------ Highlights
 
     def set_highlights(self, highlights: list):
-        """highlights: list of {rects: [[x,y,w,h]], color} em coords locais."""
+        """highlights: list of {id, rects: [[x,y,w,h]], color} em coords locais."""
         self._highlights = highlights
         self.update()
+
+    def highlight_id_at(self, pos: QPointF) -> int:
+        """Retorna o id do highlight sob pos, ou -1 se não houver."""
+        for h in self._highlights:
+            for r in h["rects"]:
+                if QRectF(r[0], r[1], r[2], r[3]).contains(pos):
+                    return h.get("id", -1)
+        return -1
 
     def get_selected_rects(self) -> list:
         """Retorna [[x, y, w, h]] das palavras selecionadas em coords locais."""
@@ -248,6 +257,13 @@ class TextLayer(QGraphicsItem):
         self._click_count += 1
 
         if self._click_count == 1:
+            # Clique sobre highlight existente abre menu de remoção
+            hid = self.highlight_id_at(event.pos())
+            if hid >= 0:
+                self._click_count = 0
+                self._signals.highlight_clicked.emit(hid, self._page_index)
+                return
+
             self._multi_selected = False
             self._drag_start     = event.pos()
             self._has_dragged    = False

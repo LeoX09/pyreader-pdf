@@ -246,7 +246,7 @@ class PDFContinuousView(QGraphicsView):
         if not self._pdf_path:
             return []
         from core.highlights import get_page_highlights
-        return [{"rects": h["rects"], "color": h["color"]}
+        return [{"id": h["id"], "rects": h["rects"], "color": h["color"]}
                 for h in get_page_highlights(self._pdf_path, page_index)]
 
     def refresh_highlights(self, page_index: int):
@@ -336,6 +336,16 @@ class PDFContinuousView(QGraphicsView):
             tl_hit    = self._text_layer_at(scene_pos)
 
             if tl_hit is not None:
+                # Clique sobre highlight existente → remoção
+                local = QPointF(scene_pos.x() - tl_hit.pos().x(),
+                                scene_pos.y() - tl_hit.pos().y())
+                hid = tl_hit.highlight_id_at(local)
+                if hid >= 0:
+                    page_idx = next(
+                        (i for i, tl in self._text_layers.items() if tl is tl_hit), 0)
+                    self.text_signals.highlight_clicked.emit(hid, page_idx)
+                    return
+
                 self._click_count += 1
                 self._click_pos        = event.pos()
                 self._drag_start_scene = scene_pos

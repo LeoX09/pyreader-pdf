@@ -34,8 +34,10 @@ class PDFTab(QWidget):
         self._notes      = None
         self._notes_visible   = False
         self._sidebar_visible = True
-        self._pending_text = ""
-        self._pending_page = 0
+        self._pending_text        = ""
+        self._pending_page        = 0
+        self._pending_remove_id   = -1
+        self._pending_remove_page = -1
         self._build(path)
 
     # ------------------------------------------------------------------ Build
@@ -100,12 +102,14 @@ class PDFTab(QWidget):
             self._single.zoom_changed.connect(self.zoom_changed)
             self._single.text_signals.text_selected.connect(self._on_text_selected)
             self._single.text_signals.selection_cleared.connect(self._on_selection_cleared)
+            self._single.text_signals.highlight_clicked.connect(self._on_highlight_clicked)
 
             self._continuous = PDFContinuousView(self._doc, path, self)
             self._continuous.page_changed.connect(self.page_changed)
             self._continuous.zoom_changed.connect(self.zoom_changed)
             self._continuous.text_signals.text_selected.connect(self._on_text_selected)
             self._continuous.text_signals.selection_cleared.connect(self._on_selection_cleared)
+            self._continuous.text_signals.highlight_clicked.connect(self._on_highlight_clicked)
 
             self._stack.addWidget(self._single)
             self._stack.addWidget(self._continuous)
@@ -125,6 +129,7 @@ class PDFTab(QWidget):
             self._highlight_bar.color_chosen.connect(self._save_highlight)
             self._highlight_bar.copy_requested.connect(self._copy_selection)
             self._highlight_bar.dismissed.connect(self._dismiss_highlight_bar)
+            self._highlight_bar.remove_requested.connect(self._remove_highlight)
             self._highlight_bar.raise_()
 
             QShortcut(QKeySequence("Ctrl+Shift+N"), self).activated.connect(
@@ -166,8 +171,23 @@ class PDFTab(QWidget):
         self._pending_page = page_index
         if text and self._highlight_bar:
             self._position_highlight_bar()
-            self._highlight_bar.show()
-            self._highlight_bar.raise_()
+            self._highlight_bar.show_selection_mode()
+
+    def _on_highlight_clicked(self, highlight_id: int, page_index: int):
+        self._pending_remove_id   = highlight_id
+        self._pending_remove_page = page_index
+        self._view().clear_selection()
+        self._position_highlight_bar()
+        self._highlight_bar.show_remove_mode(highlight_id)
+
+    def _remove_highlight(self, highlight_id: int):
+        from core.highlights import delete_highlight
+        delete_highlight(self.path, highlight_id)
+        if self._pending_remove_page >= 0:
+            self._view().refresh_highlights(self._pending_remove_page)
+        self._pending_remove_id   = -1
+        self._pending_remove_page = -1
+        self._highlight_bar.hide()
 
     def _on_selection_cleared(self):
         self._pending_text = ""
