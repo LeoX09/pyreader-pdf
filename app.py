@@ -145,25 +145,32 @@ class App(QMainWindow):
                 other_idx = i
                 break
 
+        active_tab  = self._tabs.widget(active_idx)
+        active_page = active_tab.current_page
+
         if other_idx is None:
-            active_tab = self._tabs.widget(active_idx)
-            path       = active_tab.path
-            filename   = active_tab.filename
+            path     = active_tab.path
+            filename = active_tab.filename
             if side == "right":
-                self._enter_split(path, path, filename, filename + " (2)")
+                self._enter_split(path, path, filename, filename + " (2)",
+                                  active_page, active_page)
             else:
-                self._enter_split(path, path, filename + " (2)", filename)
+                self._enter_split(path, path, filename + " (2)", filename,
+                                  active_page, active_page)
             return
 
-        other_tab = self._tabs.widget(other_idx)
+        other_tab  = self._tabs.widget(other_idx)
+        other_page = other_tab.current_page
         if side == "right":
             self._enter_split(
-                self._tabs.widget(active_idx).path, other_tab.path,
-                self._tabs.widget(active_idx).filename, other_tab.filename)
+                active_tab.path, other_tab.path,
+                active_tab.filename, other_tab.filename,
+                active_page, other_page)
         else:
             self._enter_split(
-                other_tab.path, self._tabs.widget(active_idx).path,
-                other_tab.filename, self._tabs.widget(active_idx).filename)
+                other_tab.path, active_tab.path,
+                other_tab.filename, active_tab.filename,
+                other_page, active_page)
 
     # ------------------------------------------------------------------ Split via drag
 
@@ -198,27 +205,38 @@ class App(QMainWindow):
         if not isinstance(dragged_w, PDFTab) or not isinstance(active_w, PDFTab):
             return
         if dragged_idx == active_idx:
+            page = dragged_w.current_page
             self._enter_split(
                 dragged_w.path, dragged_w.path,
-                dragged_w.filename, dragged_w.filename + " (2)")
+                dragged_w.filename, dragged_w.filename + " (2)",
+                page, page)
             return
 
         if side == "left":
             self._enter_split(
                 dragged_w.path, active_w.path,
-                dragged_w.filename, active_w.filename)
+                dragged_w.filename, active_w.filename,
+                dragged_w.current_page, active_w.current_page)
         else:
             self._enter_split(
                 active_w.path, dragged_w.path,
-                active_w.filename, dragged_w.filename)
+                active_w.filename, dragged_w.filename,
+                active_w.current_page, dragged_w.current_page)
 
     def _enter_split(self, left_path: str, right_path: str,
-                     left_name: str, right_name: str):
+                     left_name: str, right_name: str,
+                     left_page: int = 1, right_page: int = 1):
         if self._split_widget:
             self.close_split()
 
         left_tab  = PDFTab(left_path,  self)
         right_tab = PDFTab(right_path, self)
+
+        if left_page > 1:
+            left_tab.go_to(left_page)
+        if right_page > 1:
+            right_tab.go_to(right_page)
+
         self._split_tabs = [left_tab, right_tab]
 
         split = SplitView(left_tab, right_tab, left_name, right_name, self)
