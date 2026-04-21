@@ -101,6 +101,7 @@ class NotesPanel(QWidget):
     """
 
     go_to_page_requested = Signal(int)   # page_index (0-based)
+    close_requested      = Signal()
 
     def __init__(self, pdf_path: str, parent=None):
         super().__init__(parent)
@@ -132,6 +133,20 @@ class NotesPanel(QWidget):
         self._count_lbl = QLabel("0")
         self._count_lbl.setStyleSheet("color:#444; font-size:8pt; background:transparent;")
         hl.addWidget(self._count_lbl)
+
+        btn_close = QPushButton("×")
+        btn_close.setFixedSize(26, 26)
+        btn_close.setCursor(Qt.PointingHandCursor)
+        btn_close.setToolTip("Fechar painel de notas")
+        btn_close.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #555; border: none;
+                font-size: 14pt;
+            }
+            QPushButton:hover { color: #ff6b6b; }
+        """)
+        btn_close.clicked.connect(self.close_requested)
+        hl.addWidget(btn_close)
 
         layout.addWidget(header)
 

@@ -1,14 +1,15 @@
 import fitz
 from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene,
                                 QGraphicsPixmapItem, QGraphicsRectItem)
-from PySide6.QtCore import Qt, Signal, QThread, QObject, QTimer, QRectF
+from PySide6.QtCore import Qt, Signal, QThread, QObject, QTimer, QRectF, QPointF
 from PySide6.QtGui import QPixmap, QImage, QColor, QPen, QBrush, QWheelEvent
 from ui.text_layer import TextLayer, TextLayerSignals, WordRect
 
 PAGE_GAP     = 16
 PRELOAD_PX   = 900
-MIN_QUALITY  = 2.0    # zoom mínimo de renderização — qualidade base
-HIRES_DELAY  = 220    # ms debounce após zoom
+MIN_QUALITY  = 2.0
+HIRES_DELAY  = 220
+CLICK_INTERVAL = 300
 
 
 class PageRenderer(QObject):
@@ -47,27 +48,39 @@ class PDFContinuousView(QGraphicsView):
     - Zoom visual instantâneo via view.scale() (GPU)
     - Debounce: re-renderiza páginas visíveis no novo zoom após parar
     - Zero upscaling: qualidade sempre nativa ao nível de zoom
+    - Suporte a marca texto persistente e duplo/triplo clique
     """
 
     page_changed = Signal(int, int)
     zoom_changed = Signal(float)
 
-    def __init__(self, doc, parent=None):
+    def __init__(self, doc, pdf_path: str = "", parent=None):
         super().__init__(parent)
         self._doc          = doc
+        self._pdf_path     = pdf_path
         self._page_tops    = []
         self._page_heights = []
         self._page_widths  = []
         self._placeholders = {}
         self._pixmap_items = {}
-        self._render_zooms = {}   # index -> zoom em que foi renderizado
+        self._render_zooms = {}
         self._text_layers  = {}
         self._loading      = set()
         self._threads      = {}
         self._current_page = 0
         self.text_signals  = TextLayerSignals()
+
+        # Seleção por drag
         self._drag_selecting   = False
         self._drag_start_scene = None
+        self._click_pos        = None
+
+        # Múltiplos cliques
+        self._click_count = 0
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(CLICK_INTERVAL)
+        self._click_timer.timeout.connect(self._commit_click)
 
         self._hires_timer = QTimer(self)
         self._hires_timer.setSingleShot(True)
@@ -155,14 +168,11 @@ class PDFContinuousView(QGraphicsView):
         return top_y, bot_y
 
     def _render_zoom_needed(self) -> float:
-        """Zoom de renderização = max(qualidade mínima, zoom visual atual)."""
         return max(MIN_QUALITY, self.transform().m11())
 
     def _needs_rerender(self, index: int) -> bool:
-        """Página precisa re-render se nunca foi renderizada ou zoom desatualizado."""
         if index not in self._render_zooms:
             return True
-        # Re-renderiza se o zoom atual exige resolução maior que a existente
         return self._render_zoom_needed() > self._render_zooms[index] + 0.05
 
     def _lazy_load(self):
@@ -196,7 +206,6 @@ class PDFContinuousView(QGraphicsView):
         if index >= len(self._page_widths):
             return
 
-        # Descarta se um render de qualidade superior já chegou
         existing = self._render_zooms.get(index, 0)
         if render_zoom < existing - 0.05:
             return
@@ -204,7 +213,6 @@ class PDFContinuousView(QGraphicsView):
         scene_w  = self._scene.sceneRect().width()
         page_w   = self._page_widths[index]
         page_top = self._page_tops[index]
-        # scale = 1/render_zoom → pixmap renderizado em 3x fica no tamanho 1x da scene
         s = 1.0 / render_zoom
         x = (scene_w - page_w) / 2
 
@@ -222,13 +230,42 @@ class PDFContinuousView(QGraphicsView):
             self._scene.addItem(item)
             self._pixmap_items[index] = item
 
-        # Text layer — apenas uma vez por página
+        # Text layer criado apenas uma vez por página (coords de documento)
         if index not in self._text_layers:
             tl = TextLayer(QRectF(0, 0, page_w, self._page_heights[index]),
                            words, index, self.text_signals)
             tl.setPos(x, page_top)
+            tl.set_highlights(self._load_highlights_for_layer(index))
             self._scene.addItem(tl)
             self._text_layers[index] = tl
+
+    # ------------------------------------------------------------------ Highlights
+
+    def _load_highlights_for_layer(self, page_index: int) -> list:
+        """Carrega highlights em coords de documento (mesmas do TextLayer)."""
+        if not self._pdf_path:
+            return []
+        from core.highlights import get_page_highlights
+        return [{"rects": h["rects"], "color": h["color"]}
+                for h in get_page_highlights(self._pdf_path, page_index)]
+
+    def refresh_highlights(self, page_index: int):
+        if page_index in self._text_layers:
+            self._text_layers[page_index].set_highlights(
+                self._load_highlights_for_layer(page_index))
+
+    def get_selection_info(self) -> dict:
+        """Retorna {page_index: [[x,y,w,h], ...]} em coords de documento."""
+        result = {}
+        for idx, tl in self._text_layers.items():
+            rects = tl.get_selected_rects()
+            if rects:
+                result[idx] = rects
+        return result
+
+    def clear_selection(self):
+        for tl in self._text_layers.values():
+            tl.clear_selection()
 
     # ------------------------------------------------------------------ Zoom
 
@@ -246,11 +283,9 @@ class PDFContinuousView(QGraphicsView):
         self.scale(factor, factor)
         self._update_scene_rect()
         self.zoom_changed.emit(self.zoom)
-        # Debounce: re-renderiza páginas visíveis no zoom exato após parar
         self._hires_timer.start(HIRES_DELAY)
 
     def _hires_reload(self):
-        """Dispara após debounce — re-renderiza páginas visíveis no zoom atual."""
         top_y, bot_y = self._visible_range()
         for i in range(len(self._doc)):
             in_view = (self._page_tops[i] + self._page_heights[i] >= top_y and
@@ -280,54 +315,127 @@ class PDFContinuousView(QGraphicsView):
     @property
     def total_pages(self) -> int:  return len(self._doc)
 
-    # ------------------------------------------------------------------ Eventos
+    # ------------------------------------------------------------------ Helpers
 
-    # ------------------------------------------------------------------ Seleção contínua
+    def _text_layer_at(self, scene_pos: QPointF) -> TextLayer | None:
+        for tl in self._text_layers.values():
+            if tl.boundingRect().translated(tl.pos()).contains(scene_pos):
+                return tl
+        return None
+
+    def _commit_click(self):
+        """Timer expirou sem drag e sem clique duplo — apenas reseta contador."""
+        self._click_count      = 0
+        self._drag_start_scene = None
+
+    # ------------------------------------------------------------------ Eventos de mouse
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            from ui.text_layer import TextLayer as _TL
             scene_pos = self.mapToScene(event.pos())
-            on_text = any(
-                isinstance(it, _TL) and
-                it.boundingRect().translated(it.pos()).contains(scene_pos)
-                for it in self._scene.items(scene_pos)
-            )
-            if on_text:
-                self._drag_selecting   = True
+            tl_hit    = self._text_layer_at(scene_pos)
+
+            if tl_hit is not None:
+                self._click_count += 1
+                self._click_pos        = event.pos()
                 self._drag_start_scene = scene_pos
-                for tl in self._text_layers.values():
-                    tl.clear_selection()
+                self._drag_selecting   = False
+
+                if self._click_count == 1:
+                    # Limpa seleções anteriores e inicia potencial drag
+                    for tl in self._text_layers.values():
+                        tl.clear_selection()
+                    self._click_timer.start()
+
+                elif self._click_count == 2:
+                    self._click_timer.stop()
+                    self._drag_start_scene = None
+                    local = QPointF(scene_pos.x() - tl_hit.pos().x(),
+                                    scene_pos.y() - tl_hit.pos().y())
+                    tl_hit._select_word(local)
+                    tl_hit._emit_selection()
+                    tl_hit.update()
+                    self._click_timer.start()   # aguarda possível triplo
+
+                elif self._click_count >= 3:
+                    self._click_timer.stop()
+                    self._click_count      = 0
+                    self._drag_start_scene = None
+                    local = QPointF(scene_pos.x() - tl_hit.pos().x(),
+                                    scene_pos.y() - tl_hit.pos().y())
+                    tl_hit._select_line(local)
+                    tl_hit._emit_selection()
+                    tl_hit.update()
                 return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # Inicia drag se o cursor se moveu o suficiente
+        if (self._drag_start_scene is not None
+                and not self._drag_selecting
+                and self._click_pos is not None
+                and (event.pos() - self._click_pos).manhattanLength() > 6):
+            self._drag_selecting = True
+            self._click_timer.stop()
+            self._click_count = 0
+
         if self._drag_selecting and self._drag_start_scene is not None:
-            from PySide6.QtCore import QRectF
-            scene_pos  = self.mapToScene(event.pos())
-            drag_scene = QRectF(self._drag_start_scene, scene_pos).normalized()
+            scene_pos = self.mapToScene(event.pos())
+
+            # Normaliza: âncora sempre acima do foco
+            if self._drag_start_scene.y() <= scene_pos.y():
+                anchor_scene = self._drag_start_scene
+                focus_scene  = scene_pos
+            else:
+                anchor_scene = scene_pos
+                focus_scene  = self._drag_start_scene
+
             for tl in self._text_layers.values():
-                tl_rect = tl.boundingRect().translated(tl.pos())
-                if drag_scene.intersects(tl_rect):
-                    tl.select_by_rect(
-                        drag_scene.translated(-tl.pos()))
-                else:
+                tl_top    = tl.pos().y()
+                tl_bottom = tl_top + tl.boundingRect().height()
+
+                anchor_in = tl_top <= anchor_scene.y() <= tl_bottom
+                focus_in  = tl_top <= focus_scene.y()  <= tl_bottom
+                above     = tl_bottom < anchor_scene.y()
+                below     = tl_top    > focus_scene.y()
+
+                if above or below:
                     tl.clear_selection()
+                elif anchor_in and focus_in:
+                    # âncora e foco na mesma página
+                    tl.select_range_scene(anchor_scene, focus_scene)
+                elif anchor_in:
+                    # primeira página — seleciona da âncora até o fim
+                    tl.select_from_anchor(anchor_scene)
+                elif focus_in:
+                    # última página — seleciona do início até o foco
+                    tl.select_to_focus(focus_scene)
+                else:
+                    # página intermediária — seleciona tudo
+                    tl.select_all()
             return
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._drag_selecting:
-            self._drag_selecting   = False
-            self._drag_start_scene = None
-            texts = []
-            for i in sorted(self._text_layers):
-                txt = self._text_layers[i].get_selected_text()
-                if txt:
-                    texts.append(txt)
-            if texts:
-                self.text_signals.text_selected.emit(" ".join(texts), 0)
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._drag_selecting:
+                self._drag_selecting   = False
+                self._drag_start_scene = None
+                texts = []
+                for i in sorted(self._text_layers):
+                    txt = self._text_layers[i].get_selected_text()
+                    if txt:
+                        texts.append(txt)
+                if texts:
+                    self.text_signals.text_selected.emit(" ".join(texts), 0)
+                return
+            # Clique sem drag: aguarda o timer para saber se há duplo clique
+            if self._click_count == 1:
+                pass
             return
+
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
