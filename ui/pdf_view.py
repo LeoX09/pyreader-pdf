@@ -135,6 +135,28 @@ class PDFView(QGraphicsView):
             self._text_layer.set_highlights(
                 self._load_highlights_for_layer(page_index, self._zoom))
 
+    def get_selection_viewport_rect(self):
+        """Retorna QRect da seleção em coords do viewport, ou None."""
+        if not self._text_layer:
+            return None
+        sr = self._text_layer.get_scene_bounding_rect()
+        if sr is None:
+            return None
+        from PySide6.QtCore import QRect
+        return QRect(self.mapFromScene(sr.topLeft()),
+                     self.mapFromScene(sr.bottomRight())).normalized()
+
+    def get_highlight_viewport_rect(self, highlight_id: int, page_index: int = 0):
+        """Retorna QRect de um highlight em coords do viewport, ou None."""
+        if not self._text_layer:
+            return None
+        sr = self._text_layer.get_highlight_scene_rect(highlight_id)
+        if sr is None:
+            return None
+        from PySide6.QtCore import QRect
+        return QRect(self.mapFromScene(sr.topLeft()),
+                     self.mapFromScene(sr.bottomRight())).normalized()
+
     def get_selection_info(self) -> dict:
         """Retorna {page_index: [[x,y,w,h], ...]} em coords de documento."""
         if not self._text_layer:

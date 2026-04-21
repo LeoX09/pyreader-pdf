@@ -55,6 +55,7 @@ class HighlightBar(QWidget):
 
     color_chosen     = Signal(str)   # hex color
     copy_requested   = Signal()
+    note_requested   = Signal()
     dismissed        = Signal()
     remove_requested = Signal(int)   # highlight_id
 
@@ -89,6 +90,13 @@ class HighlightBar(QWidget):
         copy_btn.setStyleSheet(_BTN_BASE.format(bg="#333", fg="#ddd", hbg="#4a4a4a"))
         copy_btn.clicked.connect(self.copy_requested)
         layout.addWidget(copy_btn)
+
+        note_btn = QPushButton("📝 Nota")
+        note_btn.setFixedHeight(26)
+        note_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        note_btn.setStyleSheet(_BTN_BASE.format(bg="#1a2a3a", fg="#5dade2", hbg="#1e3a5a"))
+        note_btn.clicked.connect(self.note_requested)
+        layout.addWidget(note_btn)
 
         layout.addWidget(_sep())
 

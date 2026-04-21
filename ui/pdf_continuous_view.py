@@ -254,6 +254,34 @@ class PDFContinuousView(QGraphicsView):
             self._text_layers[page_index].set_highlights(
                 self._load_highlights_for_layer(page_index))
 
+    def get_selection_viewport_rect(self):
+        """Une os bounding rects de todas as seleções e retorna em coords do viewport."""
+        from PySide6.QtCore import QRect, QPoint
+        scene_rects = [tl.get_scene_bounding_rect()
+                       for tl in self._text_layers.values()]
+        scene_rects = [r for r in scene_rects if r is not None]
+        if not scene_rects:
+            return None
+        x0 = min(r.left()   for r in scene_rects)
+        y0 = min(r.top()    for r in scene_rects)
+        x1 = max(r.right()  for r in scene_rects)
+        y1 = max(r.bottom() for r in scene_rects)
+        from PySide6.QtCore import QPointF
+        return QRect(self.mapFromScene(QPointF(x0, y0)),
+                     self.mapFromScene(QPointF(x1, y1))).normalized()
+
+    def get_highlight_viewport_rect(self, highlight_id: int, page_index: int):
+        """Retorna QRect de um highlight em coords do viewport, ou None."""
+        tl = self._text_layers.get(page_index)
+        if not tl:
+            return None
+        sr = tl.get_highlight_scene_rect(highlight_id)
+        if sr is None:
+            return None
+        from PySide6.QtCore import QRect
+        return QRect(self.mapFromScene(sr.topLeft()),
+                     self.mapFromScene(sr.bottomRight())).normalized()
+
     def get_selection_info(self) -> dict:
         """Retorna {page_index: [[x,y,w,h], ...]} em coords de documento."""
         result = {}

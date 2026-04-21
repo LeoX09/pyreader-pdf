@@ -128,6 +128,7 @@ class PDFTab(QWidget):
             self._highlight_bar = HighlightBar(self)
             self._highlight_bar.color_chosen.connect(self._save_highlight)
             self._highlight_bar.copy_requested.connect(self._copy_selection)
+            self._highlight_bar.note_requested.connect(self._save_pending_selection)
             self._highlight_bar.dismissed.connect(self._dismiss_highlight_bar)
             self._highlight_bar.remove_requested.connect(self._remove_highlight)
             self._highlight_bar.raise_()
@@ -194,11 +195,46 @@ class PDFTab(QWidget):
         if self._highlight_bar:
             self._highlight_bar.hide()
 
+    def _bar_target_rect(self):
+        """
+        Retorna QRect (em coords do PDFTab) da seleção ou highlight atual.
+        Usado para posicionar a barra flutuante perto do alvo.
+        """
+        view = self._view()
+        if self._pending_remove_id >= 0:
+            vp_rect = view.get_highlight_viewport_rect(
+                self._pending_remove_id, self._pending_remove_page)
+        else:
+            vp_rect = view.get_selection_viewport_rect()
+
+        if vp_rect is None:
+            return None
+
+        vp = view.viewport()
+        from PySide6.QtCore import QRect
+        return QRect(
+            self.mapFromGlobal(vp.mapToGlobal(vp_rect.topLeft())),
+            self.mapFromGlobal(vp.mapToGlobal(vp_rect.bottomRight()))
+        ).normalized()
+
     def _position_highlight_bar(self):
         bar = self._highlight_bar
         bar.adjustSize()
-        x = (self.width() - bar.width()) // 2
-        bar.move(x, 8)
+
+        target = self._bar_target_rect()
+        if target and target.isValid():
+            # Centraliza horizontalmente sobre a seleção, 6px acima
+            bx = target.center().x() - bar.width() // 2
+            by = target.top() - bar.height() - 6
+            # Mantém dentro dos limites do tab
+            bx = max(4, min(bx, self.width()  - bar.width()  - 4))
+            by = max(4, by)
+            # Se sair pelo topo, exibe abaixo
+            if by < 4:
+                by = target.bottom() + 6
+            bar.move(bx, by)
+        else:
+            bar.move((self.width() - bar.width()) // 2, 8)
 
     def _copy_selection(self):
         if self._pending_text:
@@ -301,6 +337,7 @@ class PDFTab(QWidget):
         super().resizeEvent(event)
         if self._highlight_bar and self._highlight_bar.isVisible():
             self._position_highlight_bar()
+            self._highlight_bar.raise_()
 
     def closeEvent(self, event):
         if self._doc:

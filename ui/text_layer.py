@@ -93,6 +93,32 @@ class TextLayer(QGraphicsItem):
             for i, w in enumerate(self._words) if i in self._selected
         ]
 
+    def get_scene_bounding_rect(self) -> QRectF | None:
+        """Bounding rect da seleção atual em coords de cena."""
+        if not self._selected:
+            return None
+        x0 = min(self._words[i].rect.left()   for i in self._selected)
+        y0 = min(self._words[i].rect.top()    for i in self._selected)
+        x1 = max(self._words[i].rect.right()  for i in self._selected)
+        y1 = max(self._words[i].rect.bottom() for i in self._selected)
+        p = self.pos()
+        return QRectF(x0 + p.x(), y0 + p.y(), x1 - x0, y1 - y0)
+
+    def get_highlight_scene_rect(self, highlight_id: int) -> QRectF | None:
+        """Bounding rect de um highlight específico em coords de cena."""
+        for h in self._highlights:
+            if h.get("id") == highlight_id:
+                rects = h["rects"]
+                if not rects:
+                    return None
+                x0 = min(r[0]      for r in rects)
+                y0 = min(r[1]      for r in rects)
+                x1 = max(r[0]+r[2] for r in rects)
+                y1 = max(r[1]+r[3] for r in rects)
+                p = self.pos()
+                return QRectF(x0 + p.x(), y0 + p.y(), x1 - x0, y1 - y0)
+        return None
+
     # ------------------------------------------------------------------ Ordem de leitura
 
     def _sorted_lines(self) -> list[list[int]]:
