@@ -5,11 +5,10 @@ from PySide6.QtCore import Qt, Signal, QThread, QObject, QTimer, QRectF, QPointF
 from PySide6.QtGui import QPixmap, QImage, QColor, QPen, QBrush, QWheelEvent
 from ui.text_layer import TextLayer, TextLayerSignals, WordRect
 
-PAGE_GAP     = 16
-PRELOAD_PX   = 900
-MIN_QUALITY  = 2.0
-HIRES_DELAY  = 220
-CLICK_INTERVAL = 300
+PAGE_GAP    = 16
+PRELOAD_PX  = 900
+MIN_QUALITY = 2.0
+HIRES_DELAY = 220
 
 
 class PageRenderer(QObject):
@@ -73,14 +72,7 @@ class PDFContinuousView(QGraphicsView):
         # Seleção por drag
         self._drag_selecting   = False
         self._drag_start_scene = None
-        self._click_pos        = None
-
-        # Múltiplos cliques
-        self._click_count = 0
-        self._click_timer = QTimer(self)
-        self._click_timer.setSingleShot(True)
-        self._click_timer.setInterval(CLICK_INTERVAL)
-        self._click_timer.timeout.connect(self._commit_click)
+        self._drag_start_vp    = None
 
         self._hires_timer = QTimer(self)
         self._hires_timer.setSingleShot(True)
@@ -351,11 +343,6 @@ class PDFContinuousView(QGraphicsView):
                 return tl
         return None
 
-    def _commit_click(self):
-        """Timer expirou sem drag e sem clique duplo — apenas reseta contador."""
-        self._click_count      = 0
-        self._drag_start_scene = None
-
     # ------------------------------------------------------------------ Eventos de mouse
 
     def mousePressEvent(self, event):
@@ -364,7 +351,6 @@ class PDFContinuousView(QGraphicsView):
             tl_hit    = self._text_layer_at(scene_pos)
 
             if tl_hit is not None:
-                # Clique sobre highlight existente → remoção
                 local = QPointF(scene_pos.x() - tl_hit.pos().x(),
                                 scene_pos.y() - tl_hit.pos().y())
                 hid = tl_hit.highlight_id_at(local)
@@ -374,54 +360,25 @@ class PDFContinuousView(QGraphicsView):
                     self.text_signals.highlight_clicked.emit(hid, page_idx)
                     return
 
-                self._click_count += 1
-                self._click_pos        = event.pos()
+                for tl in self._text_layers.values():
+                    tl.clear_selection()
                 self._drag_start_scene = scene_pos
+                self._drag_start_vp    = event.pos()
                 self._drag_selecting   = False
-
-                if self._click_count == 1:
-                    # Limpa seleções anteriores e inicia potencial drag
-                    for tl in self._text_layers.values():
-                        tl.clear_selection()
-                    self._click_timer.start()
-
-                elif self._click_count == 2:
-                    self._click_timer.stop()
-                    self._drag_start_scene = None
-                    local = QPointF(scene_pos.x() - tl_hit.pos().x(),
-                                    scene_pos.y() - tl_hit.pos().y())
-                    tl_hit._select_word(local)
-                    tl_hit._emit_selection()
-                    tl_hit.update()
-                    self._click_timer.start()   # aguarda possível triplo
-
-                elif self._click_count >= 3:
-                    self._click_timer.stop()
-                    self._click_count      = 0
-                    self._drag_start_scene = None
-                    local = QPointF(scene_pos.x() - tl_hit.pos().x(),
-                                    scene_pos.y() - tl_hit.pos().y())
-                    tl_hit._select_line(local)
-                    tl_hit._emit_selection()
-                    tl_hit.update()
                 return
 
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # Inicia drag se o cursor se moveu o suficiente
         if (self._drag_start_scene is not None
                 and not self._drag_selecting
-                and self._click_pos is not None
-                and (event.pos() - self._click_pos).manhattanLength() > 6):
+                and self._drag_start_vp is not None
+                and (event.pos() - self._drag_start_vp).manhattanLength() > 6):
             self._drag_selecting = True
-            self._click_timer.stop()
-            self._click_count = 0
 
         if self._drag_selecting and self._drag_start_scene is not None:
             scene_pos = self.mapToScene(event.pos())
 
-            # Normaliza: âncora sempre acima do foco
             if self._drag_start_scene.y() <= scene_pos.y():
                 anchor_scene = self._drag_start_scene
                 focus_scene  = scene_pos
@@ -441,16 +398,12 @@ class PDFContinuousView(QGraphicsView):
                 if above or below:
                     tl.clear_selection()
                 elif anchor_in and focus_in:
-                    # âncora e foco na mesma página
                     tl.select_range_scene(anchor_scene, focus_scene)
                 elif anchor_in:
-                    # primeira página — seleciona da âncora até o fim
                     tl.select_from_anchor(anchor_scene)
                 elif focus_in:
-                    # última página — seleciona do início até o foco
                     tl.select_to_focus(focus_scene)
                 else:
-                    # página intermediária — seleciona tudo
                     tl.select_all()
             return
 
@@ -459,8 +412,6 @@ class PDFContinuousView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._drag_selecting:
-                self._drag_selecting   = False
-                self._drag_start_scene = None
                 texts = []
                 for i in sorted(self._text_layers):
                     txt = self._text_layers[i].get_selected_text()
@@ -468,10 +419,9 @@ class PDFContinuousView(QGraphicsView):
                         texts.append(txt)
                 if texts:
                     self.text_signals.text_selected.emit(" ".join(texts), 0)
-                return
-            # Clique sem drag: aguarda o timer para saber se há duplo clique
-            if self._click_count == 1:
-                pass
+            self._drag_selecting   = False
+            self._drag_start_scene = None
+            self._drag_start_vp    = None
             return
 
         super().mouseReleaseEvent(event)

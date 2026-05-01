@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QGraphicsItem
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QObject, QTimer
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QObject
 from PySide6.QtGui import QColor, QPainter
 
 
@@ -19,35 +19,23 @@ class WordRect:
 class TextLayer(QGraphicsItem):
     """
     Camada de seleção de texto:
-    - Clique simples + drag   → seleção por ordem de leitura (âncora → foco)
-    - Clique duplo            → seleciona a palavra inteira
-    - Clique triplo           → seleciona a linha inteira
+    - Clique + drag → seleção por ordem de leitura (âncora → foco)
     - Cursor IBeam apenas sobre palavras
     - Highlights persistentes renderizados em semi-transparente
     """
 
-    CLICK_INTERVAL = 300
-
     def __init__(self, page_rect: QRectF, words: list,
                  page_index: int, signals: TextLayerSignals):
         super().__init__()
-        self._rect           = page_rect
-        self._words          = words
-        self._page_index     = page_index
-        self._signals        = signals
-        self._selected       = set()
-        self._drag_start     = None
-        self._has_dragged    = False
-        self._on_text        = False
-        self._click_count    = 0
-        self._last_pos       = QPointF()
-        self._multi_selected = False
-        self._highlights     = []   # list of {rects: [[x,y,w,h]], color}
-
-        self._click_timer = QTimer()
-        self._click_timer.setSingleShot(True)
-        self._click_timer.setInterval(self.CLICK_INTERVAL)
-        self._click_timer.timeout.connect(self._commit_click)
+        self._rect       = page_rect
+        self._words      = words
+        self._page_index = page_index
+        self._signals    = signals
+        self._selected   = set()
+        self._drag_start = None
+        self._has_dragged = False
+        self._on_text    = False
+        self._highlights = []
 
         self.setAcceptHoverEvents(True)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
@@ -67,7 +55,7 @@ class TextLayer(QGraphicsItem):
             for r in h["rects"]:
                 painter.fillRect(QRectF(r[0], r[1], r[2], r[3]), c)
         # Seleção atual
-        sel_color = QColor(41, 128, 185, 120)
+        sel_color = QColor(50, 150, 255, 140)
         for i in self._selected:
             painter.fillRect(self._words[i].rect, sel_color)
 
@@ -279,85 +267,33 @@ class TextLayer(QGraphicsItem):
     # ------------------------------------------------------------------ Mouse
 
     def mousePressEvent(self, event):
-        self._last_pos = event.pos()
-        self._click_count += 1
+        hid = self.highlight_id_at(event.pos())
+        if hid >= 0:
+            self._signals.highlight_clicked.emit(hid, self._page_index)
+            return
 
-        if self._click_count == 1:
-            # Clique sobre highlight existente abre menu de remoção
-            hid = self.highlight_id_at(event.pos())
-            if hid >= 0:
-                self._click_count = 0
-                self._signals.highlight_clicked.emit(hid, self._page_index)
-                return
-
-            self._multi_selected = False
-            self._drag_start     = event.pos()
-            self._has_dragged    = False
-            self._selected.clear()
-            self._click_timer.start()
-        elif self._click_count == 2:
-            self._click_timer.stop()
-            self._select_word(event.pos())
-            self._multi_selected = True
-            self._emit_selection()
-            self._click_timer.start()
-        elif self._click_count >= 3:
-            self._click_timer.stop()
-            self._select_line(event.pos())
-            self._multi_selected = True
-            self._click_count    = 0
-            self._emit_selection()
-
+        self._drag_start  = event.pos()
+        self._has_dragged = False
+        self._selected.clear()
         self.update()
 
     def mouseMoveEvent(self, event):
-        if self._drag_start is None or self._click_count != 1:
+        if self._drag_start is None:
             return
         if (event.pos() - self._drag_start).manhattanLength() > 3:
             self._has_dragged = True
-        # Seleção por ordem de leitura: âncora → foco
         self._select_range(self._drag_start, event.pos())
         self.update()
 
     def mouseReleaseEvent(self, event):
-        if self._click_count == 1 and self._has_dragged:
-            self._click_timer.stop()
-            self._click_count = 0
-            self._drag_start  = None
-            self._has_dragged = False
+        if self._has_dragged:
             self._emit_selection()
         else:
-            self._drag_start  = None
-            self._has_dragged = False
-
-    # ------------------------------------------------------------------ Click handlers
-
-    def _commit_click(self):
-        self._click_count = 0
-        if not self._multi_selected:
-            if self._selected:
-                self._selected.clear()
-                self._signals.selection_cleared.emit()
-                self.update()
-        self._multi_selected = False
-
-    def _select_word(self, pos: QPointF):
-        self._selected.clear()
-        idx = self._word_at(pos)
-        if idx is not None:
-            self._selected.add(idx)
-
-    def _select_line(self, pos: QPointF):
-        self._selected.clear()
-        idx = self._word_at(pos)
-        if idx is None:
-            return
-        ref_y     = self._words[idx].rect.center().y()
-        tolerance = self._words[idx].rect.height() * 0.6
-        self._selected = {
-            i for i, w in enumerate(self._words)
-            if abs(w.rect.center().y() - ref_y) <= tolerance
-        }
+            self._selected.clear()
+            self._signals.selection_cleared.emit()
+            self.update()
+        self._drag_start  = None
+        self._has_dragged = False
 
     # ------------------------------------------------------------------ Emit
 
