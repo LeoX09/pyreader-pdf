@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QFrame, QGridLayout, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal, QMimeData
-from PySide6.QtGui import QPixmap, QImage, QDrag, QPainter, QColor
+from PySide6.QtGui import QPixmap, QImage, QDrag, QPainter, QColor, QPen
 
 from qfluentwidgets import (
     SearchLineEdit, SmoothScrollArea, CardWidget,
@@ -34,18 +34,20 @@ class DraggableCard(CardWidget):
 
     def __init__(self, item: dict, mode: str, parent=None):
         super().__init__(parent)
-        self.path    = item["path"]
-        self._mode   = mode
+        self.path         = item["path"]
+        self._mode        = mode
         self._drag_start_pos = None
-        self._dragging       = False
+        self._dragging    = False
+        self._hover       = False
+        self._drag_over   = False
 
         exists = os.path.exists(self.path)
+        self._draggable = exists and mode == "library"
         name   = item["name"].replace(".pdf","").replace(".PDF","")
         short  = name if len(name) <= 18 else name[:15] + "…"
 
         self.setFixedSize(CARD_W, CARD_H)
-        if exists and mode == "library":
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        if self._draggable:
             self.setAcceptDrops(True)
 
         layout = QVBoxLayout(self)
@@ -79,6 +81,30 @@ class DraggableCard(CardWidget):
         btn_x.setFixedSize(22, 22)
         btn_x.move(CARD_W - 28, 4)
         btn_x.clicked.connect(lambda: self.remove_requested.emit(self.path))
+
+    def enterEvent(self, event):
+        if self._draggable:
+            self._hover = True
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._hover or self._drag_over:
+            color = QColor("#52c0f0") if self._drag_over else QColor("#4a9eca")
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 8, 8)
+            painter.end()
 
     def set_pixmap(self, pixmap: QPixmap):
         try:
@@ -128,12 +154,17 @@ class DraggableCard(CardWidget):
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText() and self._mode == "library":
+            self._drag_over = True
+            self.update()
             event.acceptProposedAction()
 
     def dragLeaveEvent(self, event):
-        pass
+        self._drag_over = False
+        self.update()
 
     def dropEvent(self, event):
+        self._drag_over = False
+        self.update()
         if event.mimeData().hasText() and self._mode == "library":
             self.dropped_on.emit(self)
             event.acceptProposedAction()
